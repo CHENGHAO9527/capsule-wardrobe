@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>录入工作台</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>录入工作台</h1>
+  <span class="sub" id="sub"></span>
+</div>
+
+<div class="wrap">
+
+  <!-- 模型接入的入口只有一处（设置页），这里只显示状态并跳过去。
+       之前把配置面板折叠在本页里，用户从今日页点「去配置」过来什么都看不到。 -->
+  <div class="card" id="visionCta" hidden>
+    <h2>自动识别还没开启</h2>
+    <div class="note" style="margin-top:0">
+      现在每件衣服要手点一下槽位。<b>接一个视觉模型后，上传照片就自动填好品类和全部字段，一下都不用点。</b>
+      智谱 GLM-4V 有免费额度，国内直连。
+    </div>
+    <div class="row" style="margin-top:10px">
+      <a class="btn primary" href="/settings">去接模型</a>
+    </div>
+  </div>
+
+  <!-- ── 上传 ── -->
+  <div class="card">
+    <div class="upload-zone" id="zone">
+      点这里选照片（可多选）<br>
+      <span class="muted" style="font-size:12px">纯色背景 · 白天散射光 · 垂直俯拍 · 一次拍完一批</span>
+    </div>
+    <input type="file" id="file" accept="image/*" multiple hidden>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="addBlank">+ 手动加一件</button>
+      <button class="btn" id="exportBtn">导出 JSON</button>
+    </div>
+    <div class="note" id="modeNote"></div>
+  </div>
+
+  <!-- ── 待入库 ── -->
+  <div class="card" id="pendingCard" hidden>
+    <h2>待入库 <span class="muted" id="pcount"></span></h2>
+    <div class="needbar" id="needBar" hidden></div>
+    <!-- 同一段提示（整批都是手机截图时，26 张卡会各印一遍一模一样的话）收成顶一条 -->
+    <div class="notehoist" id="hoistNote" hidden></div>
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn sm" id="recognizeAll">↻ 全部识别</button>
+      <select id="bulkSlot" style="width:auto;flex:1;min-width:110px"></select>
+    </div>
+    <div class="grid-cards" id="grid"></div>
+    <button class="btn ok block" id="saveAll" style="margin-top:12px">全部入库</button>
+    <div class="note">不用逐件确认。<b>槽位点一下就够</b> —— 其余字段已经按品类填好，改完直接全部入库。</div>
+  </div>
+
+  <!-- ── 疑似重复 ──
+       只在真的检测到像素级相同的两张图时出现，删完自动消失。 -->
+  <div class="card" id="dupesCard" hidden>
+    <h2>疑似重复录入 <span class="muted" id="dupCount"></span></h2>
+    <div id="dupes"></div>
+    <div class="note">
+      这两张图<b>逐像素完全一样</b>，所以基本是同一件衣服录了两遍。
+      留哪一件、删哪一件由你定 —— 我不会自动删（同款不同色也长得很像）。
+    </div>
+  </div>
+
+  <!-- ── 已入库 ── -->
+  <div class="card">
+    <h2>已入库 <span class="muted" id="count"></span></h2>
+    <div class="note" style="margin:0 0 10px">
+      内搭/中间层上那两个按钮是<b>叠穿开关</b>：标了「只能单穿」的件不会再被塞进外套里面。
+    </div>
+    <div id="list"><div class="muted">载入中 <span class="spin"></span></div></div>
+  </div>
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let meta = null;
+let vcfg = null;
+let pending = [];
+let saving = false;
+
+/* 不参与自动默认值的字段（模型/本地都不会去动它们） */
+const USER_FIELDS = ['name', 'status', 'notes', 'purchase_price', 'location', 'is_signature'];
+const SLOT_ORDER = ['L1', 'L2', 'L3', 'L4I', 'L4', 'L5', 'ACC'];
+
+/* ══════════════ 启动 ══════════════ */
+
+async function boot() {
+  meta = await loadMeta();
+  $('#file').addEventListener('change', onFiles);
+  $('#zone').addEventListener('click', () => $('#file').click());
+  $('#addBlank').addEventListener('click', () => { pending.push(newCard({})); render(); });
+  $('#exportBtn').addEventListener('click', exportJson);
+  $('#saveAll').addEventListener('click', saveAll);
+  $('#recognizeAll').addEventListener('click', () => recognize(pending.map(c => c._id)));
+  $('#bulkSlot').innerHTML = '<option value="">全部设为…</option>' +
+    SLOT_ORDER.map(s => `<option value="${s}">${esc(meta.slots[s])}</option>`).join('');
+  $('#bulkSlot').addEventListener('change', e => {
+    const s = e.target.value;
+    if (!s) return;
+    pending.forEach(c => { c.slot = s; c._picked = true; applyDefaults(c); });
+    e.target.value = '';
+    render();
+  });
+
+  await loadVisionConfig();
+  await refreshList();
+  await refreshDupes();
+}
+
+/* 只读配置，用来决定提示文案和「全部识别」按钮是否可用。
+   配置的编辑一律在 /settings 页做，这里不再维护第二份表单。 */
+async function loadVisionConfig() {
+  try { vcfg = await API.get('/api/vision/config'); } catch (e) { vcfg = null; }
+  const on = !!(vcfg && vcfg.enabled);
+  $('#visionCta').hidden = on;
+  $('#recognizeAll').hidden = !on;
+  $('#modeNote').innerHTML = on
+    ? '已开启自动识别：上传后自动填好品类和全部字段，<b>你只需要扫一眼点「全部入库」</b>。'
+    : '未开启自动识别：上传后颜色自动测好，<b>槽位点一下</b>，其余字段按品类自动填。想连这一下也省掉 → <a href="/settings">去接模型</a>。';
+}
+
+/* ══════════════ 上传 ══════════════ */
+
+async function onFiles(e) {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  const newIds = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    $('#sub').textContent = `上传中 ${i + 1}/${files.length}`;
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '上传失败');
+      const card = newCard({
+        name: f.name.replace(/\.[^.]+$/, ''),
+        uid: data.uid,
+        img_display: data.img_display,
+        img_llm: data.img_llm,
+        img_raw: data.img_raw,
+        color_main: data.color.name || '',
+        color_hex: data.color.hex || '',
+        is_neutral: data.color.neutral || 0,
+        _observed: data.color.observed_hex || '',
+        _colorOk: !!data.color.confident,
+        // 截图（带状态栏/导航栏）测出来的颜色不可信，而且九成是反的。
+        // 尽早提示，别让它悄悄变成脏数据 —— 颜色决定撞色和中性色判定。
+        _note: data.color.framed
+          ? '这看着是手机截图，不是原图 —— 颜色多半测反了，建议传原图'
+          : '',
+      });
+      pending.push(card);
+      newIds.push(card._id);
+    } catch (err) { toast(err.message); }
+  }
+  $('#sub').textContent = '';
+  render();
+  if (vcfg && vcfg.enabled && newIds.length) recognize(newIds);
+}
+
+/* ══════════════ 卡片 ══════════════ */
+
+function newCard(extra) {
+  const card = {
+    _id: 'c' + Math.random().toString(36).slice(2),
+    _touched: new Set(),
+    _source: 'local',
+    _picked: false,
+    _open: false,
+    _busy: false,
+    _note: '',
+    stage: 'owned',
+    uid: '', img_display: '', img_llm: '', img_raw: '', _observed: '', _colorOk: true,
+    name: '', slot: 'L1', category: 'T恤',
+    color_main: '', color_hex: '', is_neutral: 0,
+    status: 'in_wardrobe', notes: '', purchase_price: '', location: '', is_signature: 0,
+    ...extra,
+  };
+  applyDefaults(card, true);
+  return card;
+}
+
+function applyDefaults(card, force) {
+  const d = (meta.category_defaults || {})[card.category] || {};
+  for (const k in d) {
+    if (force || !card._touched.has(k)) card[k] = d[k];
+  }
+  // 槽位决定哪些字段根本没意义：裤子/鞋没有领型，鞋和配饰没有衣长。
+  // 不清掉的话，D2/D3/D6 这些叠穿规则会拿噪声去比对。
+  if (['L4I', 'L4', 'L5', 'ACC'].includes(card.slot)) {
+    if (force || !card._touched.has('collar')) card.collar = '';
+    if (force || !card._touched.has('sleeve')) card.sleeve = '';
+  }
+  if (['L5', 'ACC'].includes(card.slot)) {
+    if (force || !card._touched.has('length_band')) card.length_band = '';
+  }
+}
+
+function badge(c) {
+  if (c._busy) return '<span class="tag info">识别中</span>';
+  if (c._source === 'model') return `<span class="tag ok">自动识别${c._conf ? ' ' + Math.round(c._conf * 100) + '%' : ''}</span>`;
+  if (!c._picked) return '<span class="tag bad">必选槽位</span>';
+  return '<span class="tag warn">手填</span>';
+}
+
+function render() {
+  $('#pendingCard').hidden = pending.length === 0;
+  $('#pcount').textContent = pending.length ? `共 ${pending.length} 件` : '';
+  const unpicked = pending.filter(c => !c._picked).length;
+  $('#saveAll').textContent = unpicked
+    ? `还有 ${unpicked} 件没选槽位`
+    : (pending.length ? `全部入库（${pending.length} 件）` : '全部入库');
+  $('#saveAll').disabled = unpicked > 0;
+  $('#needBar').hidden = unpicked === 0;
+  if (unpicked) {
+    $('#needBar').textContent =
+      `↓ ${unpicked} 件还没选槽位。每件点一下内搭/中层/外层/下装/鞋/配饰，或者用上面的「全部设为…」批量指定。`;
+  }
+
+  // ── 同一段提示收成列表顶一条 ──
+  // 整批上传手机截图时，26 张卡会各印一遍一模一样的话（实测 13 条、内容完全一致）。
+  // 只把**出现 ≥2 次**的那几句提到顶上；只出现一次的还是留在那一行里，不丢信息。
+  const noteGroups = new Map();
+  pending.forEach(c => {
+    if (!c._note) return;
+    if (!noteGroups.has(c._note)) noteGroups.set(c._note, []);
+    noteGroups.get(c._note).push(c._id);
+  });
+  const hoistedIds = new Set();
+  const hoistLines = [];
+  noteGroups.forEach((ids, txt) => {
+    if (ids.length < 2) return;
+    ids.forEach(id => hoistedIds.add(id));
+    hoistLines.push(`${ids.length} 件：${txt}`);
+  });
+  const hn = $('#hoistNote');
+  hn.hidden = hoistLines.length === 0;
+  hn.innerHTML = hoistLines.map(esc).join('<br>');
+
+  $('#grid').innerHTML = pending.map(c => {
+    const dot = c._observed || c.color_hex;
+    return `
+    <div class="gcard prow${c._picked ? '' : ' need'}" data-id="${c._id}">
+      <div class="p-top">
+        ${c.img_display
+          ? `<img class="gc-thumb" src="${esc(c.img_display)}" alt="">`
+          : `<div class="gc-thumb ph">无图</div>`}
+        <div class="p-mid">
+          <input class="gc-name" data-f="name" value="${esc(c.name)}" placeholder="起个名">
+          <div class="gc-color" title="本地实测 ${esc(c._observed || '—')}">${dot ? `<span class="dot" style="background:${esc(dot)}"></span>` : ''}${esc(c.color_main || '颜色未知')}${c.is_neutral ? ' <span class="muted">中性</span>' : ''}</div>
+          ${c._note && !hoistedIds.has(c._id) ? `<div class="gc-warn">${esc(c._note)}</div>` : ''}
+        </div>
+        <div class="acts">
+          <button class="btn sm" data-act="more">${c._open ? '收起' : '改字段'}</button>
+          <button class="btn sm danger" data-act="del">删</button>
+        </div>
+      </div>
+
+      <div class="gc-slots">
+        ${SLOT_ORDER.map(s => `<button type="button" data-slot="${s}"${c.slot === s ? ' class="on"' : ''}>${esc(meta.slots[s])}</button>`).join('')}
+      </div>
+
+      <div class="p-bot">
+        <select data-f="category">${option(meta.categories[c.slot] || [], c.category)}</select>
+        ${badge(c)}
+        <div class="gc-meta">正式 ${c.formality} · 厚度 ${thickWord(c.thickness)} · ${c.temp_min}~${c.temp_max}℃${c.collar ? ' · ' + esc(c.collar) : ''}${c.material ? ' · ' + esc(c.material) : ''}</div>
+        ${c.uid ? `<button class="btn sm" data-act="retry">重识别</button>` : ''}
+      </div>
+
+      ${c._open ? pendingExtra(c) : ''}
+    </div>`;
+  }).join('');
+}
+
+/* 待入库卡的手填区。**刻意不搬进覆盖式面板**（已入库那边搬了）：
+   这里是批量作业，你要边看这一件边点下一件的槽位，盖住全屏反而挡路。 */
+function pendingExtra(c) {
+  return `
+      <div class="gc-extra">
+        <div class="grid2">
+          <div><label>正式度 <b>${c.formality}</b></label><input type="range" data-f="formality" min="1" max="5" value="${c.formality}"></div>
+          <div><label>温度区间</label><input type="number" data-f="temp_min" value="${c.temp_min}" style="margin-bottom:4px"><input type="number" data-f="temp_max" value="${c.temp_max}"></div>
+          <div><label>保暖值 ℃</label><input type="number" data-f="warmth" value="${c.warmth ?? ''}" placeholder="按品类默认"></div>
+        </div>
+        ${thickPicker('f', c.thickness)}
+        <div class="grid2">
+          <div><label>主色</label><select data-f="color_main">${['<option value="">未选</option>'].concat(meta.colors.map(x => `<option value="${esc(x.name)}"${x.name === c.color_main ? ' selected' : ''}>${esc(x.name)}</option>`)).join('')}</select></div>
+          <div><label>中性色</label><select data-f="is_neutral"><option value="1"${c.is_neutral ? ' selected' : ''}>是</option><option value="0"${!c.is_neutral ? ' selected' : ''}>否</option></select></div>
+          <div><label>领型</label><select data-f="collar">${['<option value="">不适用</option>'].concat(meta.collars.map(v => `<option value="${v}"${v === c.collar ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>衣长</label><select data-f="length_band">${['<option value="">不适用</option>'].concat(meta.lengths.map(v => `<option value="${v}"${v === c.length_band ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>袖型</label><select data-f="sleeve">${['<option value="">不适用</option>'].concat(meta.sleeves.map(v => `<option value="${v}"${v === c.sleeve ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>版型</label><select data-f="fit">${option(meta.fits, c.fit)}</select></div>
+          <div><label>材质</label><select data-f="material">${['<option value="">未选</option>'].concat(meta.materials.map(v => `<option value="${v}"${v === c.material ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>图案</label><select data-f="pattern">${option(meta.patterns, c.pattern)}</select></div>
+          <div><label>状态</label><select data-f="status">${option(meta.statuses.map(v => ({ value: v, label: meta.status_names[v] })), c.status)}</select></div>
+          <div><label>购入价</label><input type="number" data-f="purchase_price" value="${c.purchase_price ?? ''}" placeholder="元"></div>
+        </div>
+        <label>备注（只放人格信息，不参与硬规则）</label>
+        <textarea data-f="notes" placeholder="这双鞋走久了脚疼 / 这件领口有点松">${esc(c.notes)}</textarea>
+        <div class="row" style="margin-top:6px">
+          <button class="btn sm" data-act="signature">${c.is_signature ? '★ 本命单品' : '☆ 标本命单品'}</button>
+          <button class="btn sm" data-act="reset">按品类重置</button>
+        </div>
+      </div>`;
+}
+
+
+/* ══════════════ 卡片事件 ══════════════ */
+
+$('#grid').addEventListener('click', async (e) => {
+  const cardEl = e.target.closest('.gcard');
+  if (!cardEl) return;
+  const card = pending.find(c => c._id === cardEl.dataset.id);
+  if (!card) return;
+
+  const slotBtn = e.target.closest('[data-slot]');
+  if (slotBtn) {
+    const slot = slotBtn.dataset.slot;
+    if (slot !== card.slot || !card._picked) {
+      card.slot = slot;
+      card.category = (meta.categories[slot] || [''])[0];
+      // 换槽位是"重新归类"，不是"改某个字段"：清掉被品类决定的一切，但保留用户手改过的
+      card._touched = new Set([...card._touched].filter(k => USER_FIELDS.includes(k)));
+      applyDefaults(card);
+      card._source = card._source === 'model' ? 'manual' : card._source;
+      card._picked = true;
+      render();
+    }
+    return;
+  }
+
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+  if (act === 'more') { card._open = !card._open; render(); }
+  if (act === 'del') { pending = pending.filter(c => c !== card); render(); }
+  if (act === 'signature') { card.is_signature = card.is_signature ? 0 : 1; render(); }
+  if (act === 'retry') { recognize([card._id], true); }
+  if (act === 'reset') {
+    card._touched = new Set();
+    applyDefaults(card, true);
+    render();
+  }
+});
+
+$('#grid').addEventListener('input', onField);
+$('#grid').addEventListener('change', onField);
+
+function onField(e) {
+  const f = e.target.dataset.f;
+  if (!f) return;
+  const cardEl = e.target.closest('.gcard');
+  const card = pending.find(c => c._id === cardEl.dataset.id);
+  if (!card) return;
+
+  let v = e.target.value;
+  if (['formality', 'thickness', 'temp_min', 'temp_max', 'warmth',
+       'is_neutral', 'purchase_price'].includes(f)) {
+    v = v === '' ? null : Number(v);
+  }
+  card[f] = v;
+  card._touched.add(f);
+  if (card._source === 'model' && f !== 'name') card._source = 'manual';
+
+  if (f === 'category') {
+    // 换品类 = 重新套用该类默认值，用户手改过的字段保留
+    applyDefaults(card);
+    render();
+    return;
+  }
+  if (f === 'color_main') {
+    const c = meta.colors.find(x => x.name === v);
+    if (c) { card.color_hex = c.hex; card.is_neutral = c.neutral; }
+    render();
+    return;
+  }
+  if (f === 'slot') return;
+  if (f === 'name') return;
+
+  // 其余字段就地更新摘要，不整页重绘（避免输入框失焦）
+  const metaEl = cardEl.querySelector('.gc-meta');
+  if (metaEl && f !== 'notes' && f !== 'status' && f !== 'purchase_price') {
+    metaEl.innerHTML = `正式 ${card.formality} · 厚度 ${thickWord(card.thickness)} · ${card.temp_min}~${card.temp_max}℃` +
+      (card.collar ? ' · ' + esc(card.collar) : '') + (card.material ? ' · ' + esc(card.material) : '');
+  }
+  // 厚度显示的是**词**不是数字（用户："我其实没有办法判断"）。
+  const lbl = e.target.parentElement.querySelector('label b');
+  if (lbl) {
+    if (f === 'thickness') lbl.textContent = thickWord(v);
+    else if (f === 'formality') lbl.textContent = v;
+  }
+}
+
+/* ══════════════ 识别 ══════════════ */
+
+async function recognize(ids, single) {
+  const cards = pending.filter(c => ids.includes(c._id) && c.uid);
+  if (!cards.length) return;
+  if (!vcfg || !vcfg.enabled) {
+    if (single) {
+      toast('还没接模型 —— 点右上角「设置」');
+      $('#visionCta').hidden = false;
+      $('#visionCta').scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+    return;
+  }
+  cards.forEach(c => { c._busy = true; c._note = ''; });
+  render();
+
+  let res;
+  try {
+    res = await API.post('/api/vision/analyze', {
+      items: cards.map(c => ({ key: c._id, uid: c.uid, slot: c.slot })),
+    });
+  } catch (err) {
+    cards.forEach(c => { c._busy = false; c._note = err.message; });
+    render();
+    toast('识别失败：' + err.message);
+    return;
+  }
+
+  if (!res.enabled) {
+    cards.forEach(c => { c._busy = false; });
+    render();
+    toast('识别未启用：' + (res.reason || ''));
+    return;
+  }
+
+  let okCount = 0;
+  for (const c of cards) {
+    c._busy = false;
+    const r = res.results[c._id];
+    if (!r) {
+      c._note = (res.errors && res.errors[c._id]) || '识别失败';
+      continue;
+    }
+    okCount++;
+    // 只吃语义字段。颜色一律保留本地测出来的值，模型说什么都不采纳 ——
+    // 唯一例外见下面：本地的测色已经明确不可信时。
+    const keep = { color_main: c.color_main, color_hex: c.color_hex,
+                   is_neutral: c.is_neutral, _observed: c._observed, _colorOk: c._colorOk,
+                   uid: c.uid, img_display: c.img_display, img_llm: c.img_llm, img_raw: c.img_raw };
+    const name = (c.name || '').trim();
+    /* ⚠️ **用户已经手改过的字段要先存一份，识别结果落定后再盖回去。**
+       识别要跑好几秒，这几秒里用户自然会先纠错；不加这一段的话
+       `Object.assign` 会把他改的整片冲回模型值 —— 界面上就是
+       "选完又跳回默认"（试衣间真被报过，见 checkthick F3；这里是同源的一处）。 */
+    const touchedSnap = {};
+    for (const k of c._touched) if (k in c) touchedSnap[k] = c[k];
+    Object.assign(c, r, keep);
+    for (const k in touchedSnap) c[k] = touchedSnap[k];
+    if (name && !c._touched.has('name')) c.name = r.name || name;
+    c._source = 'model';
+    c._picked = true;
+    c._conf = r._confidence;
+    c._dropped = r._dropped || [];
+    c._note = c._dropped.length ? '模型给的 ' + c._dropped.join('/') + ' 不合法，已按品类默认值补上' : '';
+    delete c._confidence;
+
+    // ── 颜色兜底 ──
+    // 图片被判定为截图（外圈不是纯色 → 四角取到的是状态栏/导航栏）时，本地测色会整个
+    // 测反。这时退而从模型给的名字里取颜色，并明确标注这是推断值不是测量值。
+    if (!c._colorOk) {
+      const pal = colorFromName(c.name);
+      if (pal) {
+        const info = (meta.colors || []).find(x => x.name === pal);
+        if (info) {
+          c.color_main = info.name;
+          c.color_hex = info.hex;
+          c.is_neutral = info.neutral;
+          c._observed = info.hex;
+          c._colorOk = true;
+          c._note = '颜色是按识别命名推断的（这张图是截图，像素测量不可信）—— 建议传原图重录';
+        }
+      }
+    }
+  }
+  render();
+  if (single) toast(okCount ? '识别完成' : '识别失败，已退回默认值');
+}
+
+/* ══════════════ 入库 ══════════════ */
+
+function toPayload(c) {
+  const body = {};
+  for (const k of ['name', 'slot', 'category', 'stage', 'color_main', 'color_hex', 'is_neutral',
+                   'formality', 'thickness', 'temp_min', 'temp_max', 'warmth', 'collar', 'sleeve',
+                   'length_band', 'fit', 'material', 'pattern', 'status', 'notes',
+                   'purchase_price', 'location', 'is_signature',
+                   // 图片必须一起提交，否则入库后是个没图的空壳
+                   'img_raw', 'img_display', 'img_llm']) {
+    body[k] = c[k];
+  }
+  if (body.purchase_price === '' || body.purchase_price == null) body.purchase_price = null;
+  for (const k of ['img_raw', 'img_display', 'img_llm']) {
+    if (!body[k]) body[k] = null;
+  }
+  if (!body.name || !String(body.name).trim()) {
+    body.name = [c.color_main, c.category].filter(Boolean).join(' ') || c.category || '未命名';
+  }
+  return body;
+}
+
+async function saveAll() {
+  if (saving || !pending.length) return;
+
+  // 没有槽位就不许入库。
+  // 默认槽位是 L1/T恤，如果放行，"全部入库"会把所有衣服静默存成内搭T恤 ——
+  // 实测发生过：14 件真实衣服全变成「内搭·T恤·-10~38℃」，一模一样。
+  // 一次点击是这个流程里必须保留的摩擦，不能省。
+  const unpicked = pending.filter(c => !c._picked);
+  if (unpicked.length) {
+    toast(`还有 ${unpicked.length} 件没选槽位 —— 每件点一下才行`);
+    render();
+    const first = document.querySelector('.gcard.need');
+    if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    return;
+  }
+
+  saving = true;
+  $('#saveAll').textContent = '入库中…';
+  try {
+    const r = await API.post('/api/items/bulk', pending.map(toPayload));
+    const failedIds = new Set((r.failed || []).map(f => pending[f.index] && pending[f.index]._id));
+    pending = pending.filter(c => failedIds.has(c._id));
+    render();
+    await refreshList();
+    toast(r.failed && r.failed.length
+      ? `入库 ${r.count} 件，${r.failed.length} 件失败（已留在列表里）`
+      : `已入库 ${r.count} 件`);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    saving = false;
+    render();
+  }
+}
+
+/* ══════════════ 疑似重复录入 ══════════════ */
+
+let dupPairs = [];
+
+function dupCell(it) {
+  const meta = `${esc(slotName(it.slot))} · ${esc(it.category || '')}<br>` +
+    `${esc(it.color_main || '')} · 正式${it.formality} 厚度${thickWord(it.thickness)} · ${it.temp_min}~${it.temp_max}℃`;
+  return `
+    <div class="dupcell">
+      ${it.img_display ? `<img src="${esc(it.img_display)}" alt="">` : `<div class="ph">无图</div>`}
+      <div class="n">${colorDot(it.color_hex)}${esc(it.name)}</div>
+      <div class="m">${meta}</div>
+      <button class="btn sm danger" data-dupdel="${it.id}">删这件</button>
+    </div>`;
+}
+
+async function refreshDupes() {
+  let pairs = [];
+  try { pairs = (await API.get('/api/duplicates')).pairs || []; } catch (e) { pairs = []; }
+  dupPairs = pairs;
+  const el = $('#dupesCard');
+  if (!pairs.length) { el.hidden = true; return; }
+  el.hidden = false;
+  $('#dupCount').textContent = `${pairs.length} 组`;
+  $('#dupes').innerHTML = pairs.map((p, i) => `
+    <div class="duppair">
+      <div class="dupwhy">${esc(p.verdict)}　·　像素差 ${p.rms}　·　指纹差 ${p.hash_dist}/256</div>
+      <div class="duprow">${dupCell(p.a)}${dupCell(p.b)}</div>
+    </div>`).join('');
+}
+
+/* 删除的两步内联确认。**不用 window.confirm** —— 内嵌预览窗口里模态框可能被
+   静默拦掉（返回 false），点了什么也不发生；这个项目已经栽过五次"失败但不报错"。
+   第一次点改成"确认"，3 秒不操作自动复原。
+
+   ⚠️ 待确认文案只放**两个字**，而且按钮在 CSS 里是定宽的（见 app.css 里
+   `.btn.danger` 那一段）。理由：这个按钮和介绍文字挤在同一条 flex 行里，
+   文案一长按钮就撑宽，把左边的文字挤到换行 —— 手机上看起来就是
+   「点一下删，左边那行字变形了」。（2026-09-27 用户实拍的现场） */
+const ARMED_LABEL = '确认';
+
+function armDelete(btn) {
+  if (btn.dataset.armed === '1') return true;
+  btn.dataset.armed = '1';
+  btn.dataset.label = btn.textContent.trim();
+  btn.textContent = ARMED_LABEL;
+  btn.classList.add('armed');
+  setTimeout(() => {
+    if (btn.dataset.armed === '1') {
+      btn.dataset.armed = '0';
+      btn.textContent = btn.dataset.label || '删';
+      btn.classList.remove('armed');
+    }
+  }, 3200);
+  return false;
+}
+
+function disarmDelete(btn) {
+  btn.dataset.armed = '0';
+  btn.disabled = false;
+  btn.classList.remove('armed');
+  btn.textContent = btn.dataset.label || '删';
+}
+
+$('#dupes').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-dupdel]');
+  if (!btn) return;
+  if (!armDelete(btn)) return;
+  btn.disabled = true;
+  try {
+    await API.del('/api/items/' + btn.dataset.dupdel);
+    toast('已删除');
+    await refreshDupes();
+    await refreshList();
+  } catch (err) {
+    disarmDelete(btn);                       // 绝不静默失败
+    toast('删除失败：' + (err && err.message ? err.message : err));
+  }
+});
+
+/* ══════════════ 已入库 ══════════════ */
+
+let listItems = [];
+
+/* tags 存的是 JSON 数组字符串；也容忍手写逗号分隔和脏值 —— 解析不了就当没有，
+   不能让一条脏标签把整件衣服从所有搭配里静默踢出去。 */
+function parseTags(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.slice();
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch (e) {
+    return String(raw).split(/[,，、;；]/).map(s => s.trim()).filter(Boolean);
+  }
+}
+
+/* 标签按钮。只在 meta.tags 声明支持该槽位时才画 —— 目前只有 L1/L2。 */
+function tagRow(it) {
+  const defs = (meta.tags || []).filter(t => (t.slots || []).includes(it.slot));
+  if (!defs.length) return '';
+  const cur = parseTags(it.tags);
+  return `<div class="tagrow">${defs.map(t =>
+    `<button class="tagbtn${cur.includes(t.key) ? ' on' : ''}" data-tagitem="${it.id}" `
+    + `data-tagkey="${esc(t.key)}" title="${esc(t.desc)}">${esc(t.name)}</button>`).join('')}</div>`;
+}
+
+/* 展开的 id 集合。**不能存在 item 对象上** —— 每次 PATCH 之后要重新取一遍列表，
+   对象会被换掉，面板会自己收起来（看起来像"点了没反应"）。 */
+const openIds = new Set();
+
+/* 已入库单品的字段面板。
+   ⚠️ 和上传卡片**同一套字段、同一套 class、同一套 data 语义** ——
+   任何新页面都不要自创一套录入形态（"录完就没法改厚度"就是这么来的）。 */
+function ownFields(it) {
+  const optBlank = (list, cur) => ['<option value="">不适用</option>']
+    .concat((list || []).map(v =>
+      `<option value="${esc(v)}"${String(v) === String(cur) ? ' selected' : ''}>${esc(v)}</option>`))
+    .join('');
+  const optColor = (list, cur) => ['<option value="">未选</option>']
+    .concat((list || []).map(v =>
+      `<option value="${esc(v)}"${String(v) === String(cur) ? ' selected' : ''}>${esc(v)}</option>`))
+    .join('');
+  return `
+  <div class="gc-extra">
+    <div class="grid2">
+      <div><label>正式度 <b>${it.formality}</b></label><input type="range" data-ef="formality" min="1" max="5" value="${it.formality}"></div>
+      <div><label>温度区间</label>
+        <input type="number" data-ef="temp_min" value="${it.temp_min}" style="margin-bottom:4px">
+        <input type="number" data-ef="temp_max" value="${it.temp_max}">
+      </div>
+      <div><label>保暖值 ℃</label>
+        <input type="number" data-ef="warmth" value="${it.warmth ?? ''}" placeholder="按品类默认">
+        ${['L4', 'L5', 'L4I'].includes(it.slot)
+          ? '<div class="muted" style="font-size:11px;margin-top:5px">下半身不参与保暖加总</div>'
+          : '<div class="muted" style="font-size:11px;margin-top:5px">气温 + Σ保暖值 ≥ 舒适线</div>'}
+      </div>
+    </div>
+    ${thickPicker('ef', it.thickness)}
+    <div class="grid2">
+      <div><label>槽位</label><select data-ef="slot">${SLOT_ORDER.map(s => `<option value="${s}"${s === it.slot ? ' selected' : ''}>${esc(meta.slots[s])}</option>`).join('')}</select></div>
+      <div><label>品类</label><select data-ef="category">${option(meta.categories[it.slot] || [], it.category)}</select></div>
+      <div><label>主色</label><select data-ef="color_main">${optColor(meta.colors.map(x => x.name), it.color_main)}</select></div>
+      <div><label>中性色</label><select data-ef="is_neutral"><option value="1"${it.is_neutral ? ' selected' : ''}>是</option><option value="0"${!it.is_neutral ? ' selected' : ''}>否</option></select></div>
+      <div><label>领型</label><select data-ef="collar">${optBlank(meta.collars, it.collar)}</select></div>
+      <div><label>袖型</label><select data-ef="sleeve">${optBlank(meta.sleeves, it.sleeve)}</select></div>
+      <div><label>衣长</label><select data-ef="length_band">${optBlank(meta.lengths, it.length_band)}</select></div>
+      <div><label>版型</label><select data-ef="fit">${option(meta.fits, it.fit)}</select></div>
+      <div><label>材质</label><select data-ef="material">${optColor(meta.materials, it.material)}</select></div>
+      <div><label>图案</label><select data-ef="pattern">${option(meta.patterns, it.pattern)}</select></div>
+      <div><label>状态</label><select data-ef="status">${option(meta.statuses.map(v => ({ value: v, label: meta.status_names[v] })), it.status)}</select></div>
+      <div><label>购入价</label><input type="number" data-ef="purchase_price" value="${it.purchase_price ?? ''}" placeholder="元"></div>
+    </div>
+    <label>备注（只放人格信息，不参与硬规则）</label>
+    <textarea data-ef="notes" placeholder="这双鞋走久了脚疼 / 这件领口有点松">${esc(it.notes)}</textarea>
+    <div class="row" style="margin-top:6px">
+      <button class="btn sm" data-sig="${it.id}">${it.is_signature ? '★ 本命单品' : '☆ 标本命单品'}</button>
+      <button class="btn sm" data-reset="${it.id}">按品类重置</button>
+    </div>
+  </div>`;
+}
+
+function renderList() {
+  if (!listItems.length) { $('#list').innerHTML = '<div class="muted">还没有单品。</div>'; return; }
+  // 面板只画**当前揭开的那一件**。openIds 是模块作用域的 Set —— 不能挂在 item 对象上，
+  // 因为每次 PATCH 之后都要重新取一遍列表，对象会被换掉，面板会自己收起来
+  //（看起来像"点了没反应"）。
+  const opened = listItems.find(x => openIds.has(x.id)) || null;
+  // 面板里改一个字段会整块重画 —— 把滚动位置接回去，否则每改一项都跳回顶部
+  const body0 = document.querySelector('#list .sheetbody');
+  const keepScroll = body0 ? body0.scrollTop : 0;
+
+  $('#list').innerHTML = listItems.map(it => `
+    <div class="item-card item-row" data-id="${it.id}">
+      ${thumbHtml(it)}
+      <div class="info">
+        <div class="nm">
+          <span class="nmtext">${colorDot(it.color_hex)}${esc(it.name)}</span>
+          ${it.is_signature ? '<span class="tag ok">本命</span>' : ''}
+          ${it.notes ? '<span class="tag info">备注</span>' : ''}
+        </div>
+        <div class="meta">${esc(slotName(it.slot))} · ${esc(it.category || '')} · ${esc(itemMeta(it))}</div>
+      </div>
+      <div class="acts">
+        <button class="btn sm" data-open="${it.id}">改字段</button>
+      </div>
+    </div>`).join('') + (opened ? editSheet(opened) : '');
+
+  if (keepScroll) {
+    const nb = document.querySelector('#list .sheetbody');
+    if (nb) nb.scrollTop = keepScroll;
+  }
+}
+
+/* 「改字段」掀一张**只盖这一件**的面板。
+   ⚠️ 三条不能动的约束：
+     ① 面板必须画在 `#list` **里面** —— 这一页所有交互都是委托在 #list 上的，
+        挪到 body 上会**静默失效**（点了没反应，也不报错）。
+     ② 面板上挂 `item-card` 类，只是为了**不碰** patchField 里那句
+        `el.closest('.item-card')` —— 字段解析 / PATCH 逻辑一行不改。
+     ③ 主体是 ownFields(it) 原样搬进来（和上传卡片同一套字段、同一套 class）——
+        任何新页面都不要自创一套录入形态。
+
+   改之前它挤在 info 栏里：实测**只有 152px 宽、814px 高**，两列 grid 每列 70px，
+   控件全被压扁；而且一展开那一行从 241px 涨到 1065px。 */
+function editSheet(it) {
+  return `
+    <div class="item-card item-sheet" data-id="${it.id}">
+      <div class="mask" data-close="1"></div>
+      <div class="sheet">
+        <div class="sheettop">
+          <div class="sheettitle">改字段 · ${esc(it.name)}</div>
+          <button class="btn sm" data-close="1">关闭</button>
+        </div>
+        <div class="sheetbody">
+          ${ownFields(it)}
+          ${tagRow(it)}
+          <div class="delrow">
+            <div class="delhint">删掉之后，它在所有搭配里的记录一起消失。两次点击才会真删。</div>
+            <button class="btn sm danger" data-del="${it.id}">删</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+
+async function refreshList() {
+  listItems = await API.get('/api/items?stage=owned');
+  $('#count').textContent = listItems.length ? `共 ${listItems.length} 件` : '';
+  // L4I（秋裤）要排在 L4 前 —— 少写一个槽位这里会变成 undefined 相减 → NaN，
+  // 排序静默失效（列表顺序看起来"随机"）。
+  const order = { L1: 1, L2: 2, L3: 3, L4I: 4, L4: 5, L5: 6, ACC: 7 };
+  listItems.sort((a, b) => (order[a.slot] - order[b.slot]) || a.id - b.id);
+  renderList();
+}
+
+/* ══════════════ 已入库：就地改字段 ══════════════ */
+
+const NUM_FIELDS = ['formality', 'thickness', 'temp_min', 'temp_max', 'warmth',
+                    'is_neutral', 'purchase_price'];
+
+/* 拖滑杆时只更新标签上的文字，不落库也不重绘 —— 重绘会把手指底下的滑杆换掉。
+   ⚠️ 厚度这里必须写**词**：老代码写的是 `el.value`（数字），
+   而厚度滑杆现在是"藏起来的遥控器靶子" —— 用户看到的词会被这里的数字盖掉。 */
+$('#list').addEventListener('input', (e) => {
+  const el = e.target.closest('[data-ef]');
+  if (!el || el.type !== 'range') return;
+  const b = el.parentElement && el.parentElement.querySelector
+    ? el.parentElement.querySelector('label b') : null;
+  if (b) b.textContent = el.dataset.ef === 'thickness' ? thickWord(el.value) : el.value;
+});
+
+/* 揭开着面板时按 Esc 关掉（桌面上习惯这个）。手机上点遮罩或「关闭」。 */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && openIds.size) { openIds.clear(); renderList(); }
+});
+
+$('#list').addEventListener('change', (e) => {
+  const el = e.target.closest('[data-ef]');
+  if (el) { patchField(el); return; }
+});
+
+async function patchField(el) {
+  const f = el.dataset.ef;
+  const cardEl = el.closest('.item-card');
+  if (!f || !cardEl) return;
+  const id = Number(cardEl.dataset.id);
+  const it = listItems.find(x => x.id === id);
+  if (!it) return;
+
+  let v = el.value;
+  if (NUM_FIELDS.includes(f)) v = v === '' ? null : Number(v);
+  const payload = { [f]: v };
+
+  if (f === 'slot') {
+    // 换槽位是"重新归类"，不是"改某个字段"：跟着槽位走的字段要清掉，
+    // 否则 D2/D3/D6 会拿"裤子上有领型"这种噪声去比对。
+    // ⚠️ 刻意**不**顺手套用新品类默认值 —— 那会把用户手填的厚度/温度静默冲掉。
+    // 想按新品类重排，下面就有「按品类重置」这个显式按钮。
+    payload.category = (meta.categories[v] || [''])[0];
+    if (['L4I', 'L4', 'L5', 'ACC'].includes(v)) { payload.collar = ''; payload.sleeve = ''; }
+    if (['L5', 'ACC'].includes(v)) payload.length_band = '';
+  }
+
+  if (f === 'temp_min' || f === 'temp_max') {
+    const lo = Number(f === 'temp_min' ? v : it.temp_min);
+    const hi = Number(f === 'temp_max' ? v : it.temp_max);
+    if (lo >= hi) {
+      // 下限 ≥ 上限 = 这件衣服被自己的区间否掉，所有搭配里都不会再出现，
+      // 而且不报错。宁可拦住。
+      toast('温度下限必须小于上限 —— 没保存');
+      el.value = it[f];
+      return;
+    }
+  }
+
+  el.disabled = true;
+  try {
+    const updated = await API.patch('/api/items/' + id, payload);
+    Object.assign(it, updated);
+    if (f === 'slot') {
+      toast(`已改成「${slotName(v)}」—— 厚度/温度想按新品类重排就点「按品类重置」`);
+    } else {
+      toast(`「${it.name}」已更新 —— 今日推荐立刻生效`);
+    }
+    renderList();
+  } catch (err) {
+    el.disabled = false;
+    el.value = it[f];                       // 回滚显示，绝不静默失败
+    toast('保存失败：' + (err && err.message ? err.message : err));
+  }
+}
+
+async function resetByCategory(btn) {
+  const id = Number(btn.dataset.reset);
+  const it = listItems.find(x => x.id === id);
+  if (!it) return;
+  const d = (meta.category_defaults || {})[it.category] || {};
+  if (!Object.keys(d).length) { toast(`「${it.category}」没有默认值表`); return; }
+  btn.disabled = true;
+  try {
+    const updated = await API.patch('/api/items/' + id, d);
+    Object.assign(it, updated);
+    toast(`已按「${it.category}」重置 —— 今日推荐立刻生效`);
+    renderList();
+  } catch (err) {
+    btn.disabled = false;
+    toast('重置失败：' + (err && err.message ? err.message : err));
+  }
+}
+
+$('#list').addEventListener('click', async (e) => {
+  // 关闭面板（点遮罩 / 点「关闭」）。放在最前面判 —— 面板的关闭按钮没有 data-open。
+  const closeBtn = e.target.closest('[data-close]');
+  if (closeBtn) { openIds.clear(); renderList(); return; }
+
+  const openBtn = e.target.closest('[data-open]');
+  if (openBtn) {
+    const id = Number(openBtn.dataset.open);
+    if (openIds.has(id)) openIds.delete(id); else openIds.add(id);
+    renderList();
+    return;
+  }
+  const sigBtn = e.target.closest('[data-sig]');
+  if (sigBtn) {
+    const it = listItems.find(x => x.id === Number(sigBtn.dataset.sig));
+    if (!it) return;
+    sigBtn.disabled = true;
+    try {
+      const updated = await API.patch('/api/items/' + it.id, { is_signature: it.is_signature ? 0 : 1 });
+      Object.assign(it, updated);
+      renderList();
+    } catch (err) {
+      sigBtn.disabled = false;
+      toast('改本命单品失败：' + (err && err.message ? err.message : err));
+    }
+    return;
+  }
+  const resetBtn = e.target.closest('[data-reset]');
+  if (resetBtn) { await resetByCategory(resetBtn); return; }
+
+  const tagBtn = e.target.closest('[data-tagitem]');
+  if (tagBtn) { await toggleTag(tagBtn); return; }
+  const btn = e.target.closest('[data-del]');
+  if (!btn) return;
+  if (!armDelete(btn)) return;
+  btn.disabled = true;
+  try {
+    await API.del('/api/items/' + btn.dataset.del);
+    openIds.delete(Number(btn.dataset.del));
+    toast('已删除');
+    await refreshList();
+    await refreshDupes();     // 删掉的可能正好是一组重复件，卡片得跟着更新
+  } catch (err) {
+    disarmDelete(btn);        // 绝不静默失败
+    toast('删除失败：' + (err && err.message ? err.message : err));
+  }
+});
+
+async function toggleTag(btn) {
+  const it = listItems.find(x => x.id === Number(btn.dataset.tagitem));
+  if (!it) return;
+  const key = btn.dataset.tagkey;
+  // 互斥：两个都打上 = 既不能被盖住、又必须被盖住 —— 这件衣服会被夹死，
+  // 一条搭配都进不去（而且不会有任何报错）。切换时自动摘掉另一个。
+  const MUTEX = { solo_only: 'never_outer', never_outer: 'solo_only' };
+  let cur = parseTags(it.tags);
+  if (cur.includes(key)) cur = cur.filter(k => k !== key);
+  else cur = cur.filter(k => k !== MUTEX[key]).concat(key);
+
+  btn.disabled = true;
+  try {
+    const updated = await API.patch('/api/items/' + it.id, { tags: cur });
+    it.tags = updated.tags;
+    const def = (meta.tags || []).find(t => t.key === key);
+    toast(cur.includes(key)
+      ? `「${esc(it.name)}」已标为${def ? def.name : key} —— 今日推荐立刻生效`
+      : `已取消「${esc(it.name)}」的标签`);
+  } catch (err) {
+    toast('改标签失败：' + err.message);
+  }
+  await refreshList();
+}
+
+async function exportJson() {
+  const items = await API.get('/api/items');
+  const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'closet-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+boot();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs('wardrobe'));</script>
+</body>
+</html>

@@ -1,0 +1,1298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>今日穿搭</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>今日</h1>
+  <span class="sub" id="sub"></span>
+</div>
+
+<div class="wrap">
+
+  <!-- 冷启动引导 -->
+  <div class="card" id="guide" hidden></div>
+
+  <!-- 自动识别入口：只在衣橱还小的时候出现（衣服多了就别再劝了） -->
+  <div class="card" id="visionCta" hidden>
+    <h2>接个模型，录入就不用动手了</h2>
+    <div class="note" style="margin-top:0">
+      现在录一件衣服要手点一下槽位。<b>接上视觉模型后，上传照片自动填好品类和全部字段，一下都不用点。</b>
+      智谱 GLM-4V 有免费额度，国内直连，注册到用起来大概五分钟。
+    </div>
+    <div class="row" style="margin-top:10px">
+      <a class="btn primary" href="/settings">去接模型</a>
+    </div>
+  </div>
+
+  <!-- 单行温控条：这一屏**只有一个大数字** —— 真正用来挑衣服的那个。
+       天气区间、城市降为 12px 次级信息。上一版同屏并排着 33℃（天气）和 20℃（滑杆），
+       两个都用衬线大字，用户没法判断"到底按几度给我挑的衣服"。 -->
+  <div class="ctlbar" id="ctlbar">
+    <b class="tv" id="tempv">20℃</b>
+    <span class="wx" id="wxsum"></span>
+    <button class="go" id="tuneBtn" aria-expanded="false" aria-controls="panel">调</button>
+    <div class="tl" id="templabel">按这个温度挑衣服 · 够不够暖看当天最低温</div>
+  </div>
+
+  <!-- 「围绕某件搭」的**可见入口**。原来只放在「调」面板里 —— 面板默认收起，
+       用户根本找不到（原话："你的按某一件穿搭的功能在哪里呀"）。
+       功能藏起来 = 功能不存在，所以做成一条常在的细行：
+       没选时是入口，选了就是状态 + 清除。 -->
+  <div id="anchorbar"></div>
+
+  <!-- 旅行模式：人在外面时，衣橱里大半的衣服**根本不在身边**，
+       首页却还在按完整衣橱推 —— 推出来的全是留在家里的大衣。
+       平时隐藏；排过行程之后才出现一个很轻的入口。
+       它是一行状态条，不是卡片 —— 不能占掉首屏给衣服的位置。 -->
+  <div id="kitbar" hidden></div>
+  <!-- 选行程的浮层（不是 modal，就是一张卡：少一层样式依赖，也更好点） -->
+  <div class="card" id="kitsheet" hidden></div>
+
+  <!-- 温度的唯一状态源。控制搬到面板里了，但所有 JS 仍然只读这里 ——
+       这样 `fetchToday` / `saveEnv` / 「把温度调到 N℃」一处都不用动。
+       ⚠️ 三处必须同改（漏一处即静默失效）：① 事件委托挂在 #panel 而不是 #wx
+       ② 天气取不到时的城市搜索分支搬进 #wxcity ③ #temp 仍然是唯一状态源。 -->
+  <input type="hidden" id="temp" value="20">
+
+  <!-- 展开面板：默认收起。温度是天气自动填的，多数日子不需要动它；
+       真正每天要看的（衣服）不该被一次设定好的偏好挤到屏幕外面去。 -->
+  <div class="card" id="panel" hidden>
+    <label style="margin-top:2px">按几度挑衣服</label>
+    <div id="biasbox"><div class="seg" id="biasseg"></div></div>
+
+    <!-- 步进器而不是滑杆：核心组合数是**阶跃**的（16→17℃ 涨 4 倍、
+         20→21℃ 叠穿变体跌 71%），1℃ 的误差能砍掉七成可用搭配。
+         390px 宽的滑杆每像素 0.13℃、手指精度 ±5~8px —— 给不出这个精度。 -->
+    <div class="stepper">
+      <button id="tminus" aria-label="低一度">−</button>
+      <span class="sv" id="tempsv">20℃</span>
+      <button id="tplus" aria-label="高一 度">+</button>
+    </div>
+    <div class="note" id="wxadvice" hidden></div>
+
+    <label for="occ">场合</label>
+    <select id="occ"><option value="">不限</option></select>
+
+    <!-- 围绕某件搭：挑一件你喜欢的，下面只出**含它**的搭配。
+         和温度/场合并列，因为它是同一类东西 —— 一个"限定条件"，不是另一个页面。 -->
+    <label for="anchor">围绕某件搭</label>
+    <select id="anchor"><option value="">不限（从整个衣橱挑）</option></select>
+    <div class="note" id="anchornote" hidden></div>
+
+    <!-- 天气取不到时，设城市的入口在这儿（天气拉得到时整块隐藏） -->
+    <div id="wxcity" hidden></div>
+
+    <div class="note" id="envnote"></div>
+  </div>
+
+  <!-- 主推 -->
+  <div id="hero"><div class="card"><div class="muted">算搭配中 <span class="spin"></span></div></div></div>
+
+  <!-- 备选：紧挨着主推，一眼就能横向比较 -->
+  <div id="alts"></div>
+
+  <!-- 往后几天：这一屏从"一天"变成一条时间轴。
+       第一眼仍是今天大卡（上面那三套），这条只是往下一滑就能看到
+       "明天冷不冷、后天还穿不穿得出来" —— 不需要翻到计划页去。
+       点某一天 = 把温度切到那天，上面那三套跟着重算。 -->
+  <div class="card" id="timeline" hidden></div>
+
+  <!-- 今天不喜欢掉的件：和洗衣篮分开一张卡（理由不同、恢复方式也不同），
+       但样式复用洗衣篮那套 chips，免得又多一套视觉语言。 -->
+  <div class="card" id="avoided" hidden></div>
+
+  <!-- 洗衣篮：今天洗了的件。**移到推荐下面** —— 它是一条状态，
+       不该占掉首屏本该给衣服的位置。洗了 0 件时整块隐藏。 -->
+  <div class="card" id="laundry" hidden></div>
+
+  <!-- 我搭的套装：这个温度下能穿的都在这儿，一点就穿 -->
+  <div class="card" id="mysets" hidden></div>
+
+  <!-- 「这些今天穿不上」和「它在慢慢懂你」已搬去体检页 ——
+       这两栏放在挑衣服的屏上是噪音：一个是"现在用不到的"，一个是"统计"，
+       都不该挡在第一眼要看到的那套衣服前面。 -->
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let meta = null;
+let data = null;
+let idx = 0;          // 当前看的是第几套
+let busy = false;
+
+// 当日天气。拿到了就自动填温度 —— 这一屏的默认值不该是"20℃"这个凭空数字。
+let wx = null;
+let wxAuto = true;        // 用户手动调过就变 false，表示"今天我自己定"
+let wxHits = [];          // 上一次城市搜索的结果
+let visionOn = false;     // 视觉模型是否已经接上（#visionCta 的显示条件用）
+const URL_HAS_TEMP = new URLSearchParams(location.search).has('temp');
+
+const LS_KEY = 'capsule.env';
+const T_MIN = -8, T_MAX = 36;   // 和后面几页保持一致
+
+function env() {
+  let t = 20, o = '';
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+    if (typeof v.temp === 'number') t = v.temp;
+    if (typeof v.occ === 'string') o = v.occ;
+  } catch (e) {}
+  // 允许用 ?temp=23&occ=通勤 直接定位（方便收藏、也方便排查）
+  const q = new URLSearchParams(location.search);
+  const qt = Number(q.get('temp'));
+  if (q.has('temp') && Number.isFinite(qt) && qt >= -10 && qt <= 40) t = qt;
+  if (q.has('occ')) o = q.get('occ') || '';
+  return { temp: t, occ: o };
+}
+function saveEnv(t, o) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ temp: t, occ: o })); } catch (e) {}
+}
+
+async function boot() {
+  meta = await loadMeta();
+  const e0 = env();
+  $('#temp').value = e0.temp;
+  paintTemp();
+  $('#occ').innerHTML = '<option value="">不限</option>' + option(meta.occasions, e0.occ);
+  $('#occ').value = e0.occ;
+  $('#envnote').innerHTML = '想看后面几天穿什么？→ <a href="/plan">排一周 / 旅行</a>';
+
+  $('#occ').addEventListener('change', () => {
+    saveEnv(Number($('#temp').value), $('#occ').value);
+    fetchToday({ reroll: true });
+    // 场合变了，"那天能不能穿"的答案也跟着变，时间轴必须重算。
+    loadTimeline();
+  });
+
+  $('#tuneBtn').addEventListener('click', () => togglePanel());
+
+  /* 「围绕某件搭」：进面板时才拉一次衣橱列表（27 件很小，但没必要开机就拉）。
+     选一件 → 只出**含它**的搭配；清空 → 回到整个衣橱。 */
+  $('#anchor').addEventListener('change', async () => {
+    const id = $('#anchor').value;
+    const nm = id ? $('#anchor').selectedOptions[0].textContent.trim() : '';
+    const note = $('#anchornote');
+    if (note) {
+      note.hidden = !id;
+      note.textContent = id ? `下面只出含「${nm}」的搭配。想取消就选回「不限」。` : '';
+    }
+    await fetchToday({ reroll: false });
+  });
+  $('#tminus').addEventListener('click', () => nudgeTemp(-1));
+  $('#tplus').addEventListener('click', () => nudgeTemp(1));
+  togglePanel(false);        // 显式收起：不要依赖 HTML 上的 hidden 属性跟 JS 状态一致
+
+  await refreshVisionCta();
+  await loadWeather();                    // 必须在 fetchToday 之前：它会改温度
+  await fetchToday({ reroll: false });
+  // 时间轴放在最后：它是"多给一眼"的信息，主推那三套先出来。
+  await loadTimeline();
+}
+
+/* ══════════ 温度：一个状态源，两个读数 ══════════
+   `#temp`（hidden input）是唯一状态源；温控条上的大数字和步进器里的数字
+   都只是它的**读数**。这样"到底按几度挑的衣服"永远只有一个答案。 */
+
+function paintTemp() {
+  const t = Number($('#temp').value);
+  if (!Number.isFinite(t)) return;
+  const txt = t + '℃';
+  const a = $('#tempv'); if (a) a.textContent = txt;
+  const b = $('#tempsv'); if (b) b.textContent = txt;
+  const lo = $('#tminus'); if (lo) lo.disabled = t <= T_MIN;
+  const hi = $('#tplus'); if (hi) hi.disabled = t >= T_MAX;
+}
+
+function togglePanel(force) {
+  const p = $('#panel');
+  if (!p) return;
+  const open = (force === undefined) ? !!p.hidden : !!force;
+  p.hidden = !open;
+  const btn = $('#tuneBtn');
+  if (btn) {
+    btn.textContent = open ? '收起' : '调';
+    if (btn.setAttribute) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  // 展开时才去拉「围绕某件搭」的清单 —— 开机就拉等于多一次请求，多数日子用不上
+  if (open) loadAnchorOptions();
+}
+
+/* 「围绕某件搭」的下拉：按槽位分组列出在库单品。第一次展开面板时拉一次。 */
+let anchorLoaded = false;
+async function loadAnchorOptions() {
+  if (anchorLoaded) return;
+  anchorLoaded = true;
+  const sel = $('#anchor');
+  if (!sel) return;
+  try {
+    const items = await API.get('/api/items?stage=owned');
+    const bySlot = {};
+    for (const it of (items || [])) (bySlot[it.slot] = bySlot[it.slot] || []).push(it);
+    const order = ['L1', 'L2', 'L3', 'L4I', 'L4', 'L5', 'ACC'];
+    sel.innerHTML = '<option value="">不限（从整个衣橱挑）</option>'
+      + order.filter(s => bySlot[s]).map(s =>
+        `<optgroup label="${esc(slotName(s))}">`
+        + bySlot[s].map(it => `<option value="${it.id}">${esc(it.name)}</option>`).join('')
+        + '</optgroup>').join('');
+  } catch (e) {
+    anchorLoaded = false;   // 失败要能重试，别把下拉永久锁成一句话
+    sel.innerHTML = '<option value="">不限（列表没取到，收起再展开试试）</option>';
+  }
+}
+
+function nudgeTemp(d) { setTemp(Number($('#temp').value) + d); }
+
+/* 调温：按下即重算（不是松手才算）。手动调过就标记 wxAuto=false ——
+   之后天气刷新不再覆盖用户自己的选择。 */
+function setTemp(t) {
+  const v = Math.min(T_MAX, Math.max(T_MIN, Number(t)));
+  if (!Number.isFinite(v)) return;
+  $('#temp').value = v;
+  wxAuto = false;
+  paintTemp();
+  paintWx();
+  saveEnv(v, $('#occ').value);
+  fetchToday({ reroll: true });
+}
+
+function applyTemp(t) {
+  if (t == null) return;
+  $('#temp').value = t;
+  paintTemp();
+}
+
+/* ══════════ 当日天气 ══════════
+   天气是增强，不是必经环节：拉不到就安静地留一个步进器，
+   绝不能让首页打不开，也绝不编一个温度顶上。 */
+
+async function loadWeather() {
+  try {
+    wx = await API.get('/api/weather?days=1');
+  } catch (e) {
+    wx = { ok: false, reason: e.message };
+  }
+  if (wx && wx.ok && wx.day) {
+    if (!URL_HAS_TEMP && wxAuto) applyTemp(wx.day.temp);
+  } else {
+    // ⚠️ 天气取不到就必须把面板展开 —— 否则「设城市」的入口藏在收起的面板里，
+    //    用户被自己的默认值永久关在无天气状态（这一条漏了不报错）。
+    togglePanel(true);
+  }
+  paintWx();
+}
+
+function paintWx() {
+  const d = (wx && wx.ok && wx.day) ? wx.day : null;
+
+  // 行 1 右侧：城市 · 天气 · 区间（12px 次级信息，不再抢大数字的位置）
+  // 只取城市名第一段（「苏州」而不是「苏州 · 江苏 · 中国」）—— 这一条是窄条，
+  // 行政层级在这儿没有信息量，挤掉的是天气本身。
+  const sum = $('#wxsum');
+  if (sum) {
+    if (d) {
+      sum.textContent = [String(wx.label || '').split(' · ')[0], d.text || '', tempRangeText(d)]
+        .filter(Boolean).join(' · ') + (wx.stale ? ' · 旧数据' : '');
+      sum.classList.remove('off');
+    } else {
+      sum.textContent = (wx && wx.need_city) ? '还没设城市' : '没取到天气';
+      sum.classList.add('off');
+    }
+  }
+
+  // 行 2：这个数字是什么，一句话说清（不用读文档消歧）
+  const lb = $('#templabel');
+  if (lb) {
+    lb.textContent = (d && !wxAuto)
+      ? '你手动设的温度 · 够不够暖看当天最低温'
+      : '按这个温度挑衣服 · 够不够暖看当天最低温';
+  }
+
+  // 档位（搬进面板）
+  const seg = $('#biasseg'), box = $('#biasbox');
+  if (seg && box) {
+    if (!d) { box.hidden = true; seg.innerHTML = ''; }
+    else {
+      box.hidden = false;
+      const bias = wx.bias || 'avg';
+      seg.innerHTML = ['am', 'avg', 'pm'].map(k => `<button data-bias="${k}"${
+        k === bias ? ' class="on"' : ''}>按${BIAS_LABEL[k]}</button>`).join('');
+    }
+  }
+
+  // 「够不够暖」的细节：补一句最低温，别让用户自己换算
+  const adv = $('#wxadvice');
+  if (adv) {
+    adv.textContent = (d && d.tmin != null)
+      ? `这一档只决定按几度挑衣服；够不够暖看当天最低温 —— 今天 ${d.tmin}℃，${
+          d.tmin < 20 ? '早晚出门得再叠一层' : '这个天气一层就够'}。`
+      : '';
+    adv.hidden = !adv.textContent;
+  }
+
+  paintCity();
+}
+
+/* 天气拉不到时，在面板里就地给一个搜索框（不用跳页面去设）。 */
+function paintCity() {
+  const el = $('#wxcity');
+  if (!el) return;
+  const d = (wx && wx.ok && wx.day) ? wx.day : null;
+  if (d) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  const need = wx && wx.need_city;
+  el.innerHTML = `
+    <div class="note" style="margin:0 0 10px">
+      ${need ? '设一次城市，这一屏就会自己填今天的温度。'
+             : `没取到天气${wx && wx.reason ? '：' + esc(wx.reason) : ''} —— 用上面的 − / + 一样能用。`}
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <input id="wxq" placeholder="搜城市，比如 上海" style="flex:1;min-width:150px">
+      <button class="btn sm" id="wxgo">设城市</button>
+    </div>
+    <div id="wxhits"></div>`;
+}
+
+/* 档位按钮和城市搜索都长在 #panel 里 —— 事件委托必须跟着搬过来，
+   挂在旧的 #wx 上会变成"点了没反应，也不报错"。 */
+$('#panel').addEventListener('click', async (e) => {
+  const biasBtn = e.target.closest('[data-bias]');
+  if (biasBtn) {
+    try {
+      await API.post('/api/weather/config', { bias: biasBtn.dataset.bias });
+    } catch (err) { toast('切换失败：' + err.message); return; }
+    wxAuto = true;
+    await loadWeather();                 // 换档不用重新联网，缓存里的温度就地重算
+    await fetchToday({ reroll: false });
+    return;
+  }
+
+  if (e.target.id === 'wxgo') {
+    const q = ($('#wxq').value || '').trim();
+    if (!q) return;
+    $('#wxhits').innerHTML = '搜索中 <span class="spin"></span>';
+    try { wxHits = (await citySearch(q)).hits || []; }
+    catch (err) { wxHits = []; }
+    $('#wxhits').innerHTML = cityHitsHtml(wxHits, '点一条设成你的城市。');
+    return;
+  }
+
+  const hit = e.target.closest('[data-city]');
+  if (hit) {
+    const h = wxHits[Number(hit.dataset.city)];
+    if (!h) return;
+    try {
+      const r = await saveHomeCity(h);
+      toast('城市已设为 ' + r.label);
+    } catch (err) { toast('保存失败：' + err.message); return; }
+    wxAuto = true;
+    await loadWeather();
+    await fetchToday({ reroll: false });
+  }
+});
+
+/* 引导卡片：只在"衣橱还小"的时候出现。
+   28 件衣服的衣橱被劝去接模型，等于把长期偏好的位置占掉了。 */
+async function refreshVisionCta() {
+  try {
+    const v = await API.get('/api/vision/config');
+    visionOn = !!v.enabled;
+  } catch (e) { visionOn = true; }     // 拿不到就当已接上，别在这儿打扰用户
+  paintVisionCta();
+}
+
+function paintVisionCta() {
+  const el = $('#visionCta');
+  if (!el) return;
+  const n = (data && data.n_items) || 0;
+  el.hidden = visionOn || !(n < 8);
+}
+
+/* ══════════ 拉搭配 ══════════ */
+
+async function fetchToday(opts) {
+  const o = opts || {};
+  if (busy) return;
+  busy = true;
+  const temp = Number($('#temp').value);
+  const occ = $('#occ').value;
+  // 「围绕某件搭」：session 内有效，**不持久化** —— 存下来的话，第二天打开
+  // 会莫名其妙只剩几套搭配，而这行提示在面板收起时是看不见的（静默错位）。
+  const anchorVal = ($('#anchor') ? $('#anchor').value : '') || '';
+
+  /* 「换一批」要排除的是**已经看过的那几套组合**，不是把出现过的散件全部扣分。
+     ⚠️ 以前传的是"所有出现过的散件"，而后端只把它当扣分 —— 旅行模式池子只有几件时
+     等于全体一起扣、排序纹丝不动，于是"换一批"还是同一套（用户报过两次）。
+     格式：组内 `-` 连、组间 `|` 隔。 */
+  let excludeSets = '';
+  if (o.reroll && data && data.outfits && data.outfits.length) {
+    excludeSets = data.outfits
+      .map(x => (x.items || []).map(it => it.id).join('-'))
+      .filter(Boolean).join('|');
+  }
+
+  $('#hero').innerHTML = '<div class="card"><div class="muted">算搭配中 <span class="spin"></span></div></div>';
+  $('#alts').innerHTML = '';
+
+  try {
+    // 看的是未来某天时带 `include_washed=1`：洗了的衣服到那天早干了，
+    // 还把那些件排除掉的话，这里数出来的搭配数会比时间轴上写的少
+    // （实测 25℃ 那天 252 vs 224）—— 同一个温度两个数，用户只会以为坏了。
+    const future = !!curDate && !!tlData && curDate !== tlData.today;
+    const q = `temp=${temp}&occasion=${encodeURIComponent(occ)}&n=3`
+      + (anchorVal ? '&anchor=' + anchorVal : '')
+      + (excludeSets ? '&exclude_sets=' + excludeSets : '')
+      + (future ? '&include_washed=1' : '')
+      + (o.reroll ? '&seed=' + Math.floor(Math.random() * 1e9) : '');
+    data = await API.get('/api/today?' + q);
+  } catch (e) {
+    busy = false;
+    $('#hero').innerHTML = `<div class="card"><div class="verdict skip"><div class="text">${esc(e.message)}</div></div></div>`;
+    return;
+  }
+  busy = false;
+  idx = 0;
+  render();
+  /* 池子小到一套新的都排不出来（旅行模式常见）→ 明说，别让"换一批"看起来像坏了。 */
+  if (o.reroll && data && data.exhausted) {
+    toast('能排的就这些了 —— 想换点别的，往衣橱里再加几件，或退出旅行模式看看');
+  }
+}
+
+/* ══════════ 往后几天（时间轴）══════════
+   这一屏以前只能看"今天"。想知道明天冷不冷得翻到计划页 ——
+   而计划页排的是"一周不重样"，回答的不是"明天穿什么"。
+   这条时间轴只回答一个问题：那天按预报的温度，衣橱撑不撑得住。
+
+   ⚠️ `curDate` **不持久化**（跟温度/场合不一样）：
+   它是"我现在在看哪天"，是会话内的临时视角。
+   存进 localStorage 的话，明天打开会停在昨天点的那天上 —— 静默错位。 */
+let curDate = '';
+let tlData = null;
+
+async function loadTimeline() {
+  const el = $('#timeline');
+  const occ = $('#occ').value;
+  let tl;
+  try {
+    tl = await API.get('/api/timeline?days=7'
+      + (occ ? '&occasion=' + encodeURIComponent(occ) : ''));
+  } catch (e) {
+    // 取不到就整块收起 —— 这只是"多给一眼"的信息，不该在它上面报错打断主流程。
+    el.hidden = true;
+    return;
+  }
+  tlData = tl;
+  if (!tl.ok || !(tl.days || []).length) {
+    el.hidden = false;
+    el.innerHTML = `<h2>往后几天</h2>
+      <div class="muted" style="font-size:13px">${esc(
+        tl.reason || '天气还取不到，先设一次城市。')}
+        ${tl.need_city ? ' <a href="/settings">去设置</a>' : ''}</div>`;
+    return;
+  }
+  el.hidden = false;
+  renderTimeline();
+}
+
+function renderTimeline() {
+  const tl = tlData;
+  if (!tl) return;
+  const sel = curDate || tl.today;
+  $('#timeline').innerHTML = `
+    <h2>往后几天 <span class="tag">${esc(tl.city || '')}</span>${tl.stale
+      ? ' <span class="tag warn">用的是上次的预报</span>' : ''}</h2>
+    <div class="tlrows">
+      ${tl.days.map(d => {
+        const on = d.date === sel;
+        const name = d.is_today ? '今天' : (d.is_tomorrow ? '明天' : d.weekday);
+        const sub = (d.is_today || d.is_tomorrow) ? d.weekday : d.date.slice(5);
+        return `<button class="tlrow${on ? ' on' : ''}"
+                        data-tl-date="${d.date}" data-tl-temp="${d.temp}"
+                        aria-pressed="${on ? 'true' : 'false'}">
+          <span class="tlday">${name}<i>${sub}</i></span>
+          <span class="tlwx">${d.temp}℃ <em>${esc(d.text || '')}</em></span>
+          <span class="tln${d.wearable ? '' : ' bad'}">${
+            d.wearable ? d.n_cores + ' 种' : '穿不出'}</span>
+        </button>`;
+      }).join('')}
+    </div>
+    <div class="note">点某一天，上面的搭配就按那天重算。
+      「种」是那天温度下的核心组合数 —— <b>穿不出</b>说明那天太冷（或太热），
+      衣橱里没有够暖的那一件。</div>`;
+}
+
+/* 点时间轴：切温度 + 记下在看哪天。温度仍然是唯一状态源（#temp），
+   时间轴只是又一处"读数的入口"——跟步进器、大数字一样。 */
+$('#timeline').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tl-date]');
+  if (!b) return;
+  curDate = b.dataset.tlDate;
+  const t = Number(b.dataset.tlTemp);
+  if (Number.isFinite(t)) { $('#temp').value = t; paintTemp(); }
+  renderTimeline();
+  fetchToday({ reroll: false });
+});
+
+/* ══════════ 渲染 ══════════ */
+
+/* 传了 iso 就显示那天（时间轴上点过去之后），不传就是今天。 */
+function dateText(iso) {
+  if (iso) {
+    const [y, m, d] = iso.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    return `${m}月${d}日 周${'日一二三四五六'[dt.getDay()]}`;
+  }
+  const d = new Date();
+  return `${d.getMonth() + 1}月${d.getDate()}日 周${'日一二三四五六'[d.getDay()]}`;
+}
+
+/* 标题里只放"9月28日" —— 带星期就顶到 tag 上去了。 */
+function shortDate(iso) {
+  const [, m, d] = iso.split('-').map(Number);
+  return `${m}月${d}日`;
+}
+
+/* 顶栏副标题是 `text-overflow: ellipsis` —— 超了会**静默截断**，不报错。
+   这里量一次，超了就丢掉最后一段（叠穿数），保住前面更重要的信息。 */
+function setSub(text) {
+  const el = $('#sub');
+  el.textContent = text;
+  if (el.scrollWidth && el.clientWidth && el.scrollWidth > el.clientWidth) {
+    const parts = text.split(' · ');
+    if (parts.length > 2) el.textContent = parts.slice(0, -1).join(' · ');
+  }
+}
+
+function render() {
+  if (!data) return;
+
+  // 旅行模式的状态条**先画**：它在最上面，而且空态时也必须能"一键退出" ——
+  // 否则清单里的衣服被删光 → 排不出来 → 页面上找不到地方关掉它，人就被关在门外。
+  renderKit(data.kit);
+  renderAnchorBar(data.anchor);
+  renderAvoided(data);
+
+  if (data.empty) {
+    // 引导只在"衣服太少"时出现。之前无条件显示，28 件衣服的衣橱也会被劝去录入。
+    renderGuide(data.n_items < 8);
+    paintVisionCta();
+    // 空态也必须画洗衣篮 —— 否则洗光了就没地方点「恢复」，用户直接被关在门外。
+    renderLaundry(data);
+    $('#sub').textContent = data.n_items ? `${dateText(curDate)} · ${data.n_items} 件在库` : '';
+    $('#hero').innerHTML = data.reason === 'no_items'
+      ? `<div class="card"><div class="empty">
+           衣橱里还没有单品。<br>
+           <span class="muted" style="font-size:13px">先录 10 件左右，这一屏就有东西了。</span><br><br>
+           <a class="btn primary" href="/wardrobe">去录入</a>
+         </div></div>`
+      // 「衣橱是空的」和「今天没衣服穿」是两件事，不能共用一句话
+      : (data.reason === 'all_washed'
+        ? `<div class="card"><div class="empty">
+             衣服都在洗，今天没得穿。<br>
+             <span class="muted" style="font-size:13px">点下面的「全部恢复」把它们放回来。</span>
+           </div></div>`
+        // 「围绕某件搭」搭不出来：**这不是故障**，得说清是哪一头卡住的
+        : (data.reason === 'anchor_empty'
+          ? renderAnchorEmpty(data)
+          // 「全被你不喜欢掉了」—— 和"洗光了"同样要有出口，否则人被关在门外
+          : (data.reason === 'all_disliked'
+            ? `<div class="card"><div class="empty">
+                 今天不喜欢的太多了，没得挑了。<br>
+                 <span class="muted" style="font-size:13px">下面那张卡可以逐件放回来。</span>
+               </div></div>`
+            : renderNoOutfit(data))));
+    return;
+  }
+
+  renderGuide(data.n_items < 8);
+  paintVisionCta();
+  const cores = (data.cores != null) ? data.cores : data.candidates;
+  const variants = data.variants || 0;
+  // ⚠️ 副标题和 25px 的标题共用一行宽度，且是 ellipsis。
+  // 加日期后实测约 250px（可用约 282px）—— setSub 里还有一道兜底。
+  // 点了时间轴之后这里要跟着换成那天的日期，否则"在看哪天"没有任何显示。
+  // 锚定时先说"围绕谁"—— 否则只看到"3 种搭配"，会以为衣橱变差了
+  setSub(data.anchor
+    ? `围绕「${data.anchor.name}」· ${cores} 种搭配`
+    : `${dateText(curDate)} · ${data.n_items} 件 · ${cores} 种搭配`
+      + (variants > cores ? ` · ${variants} 种叠穿` : ''));
+
+  const o = data.outfits[idx];
+  if (!o) return;
+
+  /* ⚠️ 这个标记必须**同时**决定两件事，否则两处会打架：
+     ① 右上角写"模型排过序"还是"本地排序" ② 备选卡要不要显示分数。
+     上一版 ① 只看 llm_used、② 还要 llm_error 为空 ——
+     两者都真时会写出"模型排过序"下面又摆一排分数，正是那处矛盾本身。 */
+  const byLlm = !!data.llm_used && !data.llm_error;
+
+  /* 点了时间轴就看的是"那天"，不是今天。
+     ⚠️ 「就穿这套」必须收起来：它是**穿完**才点的动作，
+     摆在"明天"的搭配下面会让人误记成今天穿了 —— 穿着记录一脏，
+     后面"每天不重样""在降权的单品"全都是错的。
+     改成只提供一个中性去处，不写任何穿着记录。 */
+  const isFuture = !!curDate && !!tlData && curDate !== tlData.today;
+
+  $('#hero').innerHTML = `
+    <div class="card">
+      <h2>${isFuture ? `${esc(shortDate(curDate))}穿这套` : '今天穿这套'}
+        <span class="tag ${data.llm_error ? 'warn' : (byLlm ? 'ok' : '')}">${
+          byLlm ? '模型排过序'
+            : (data.llm_error ? '模型没回应' : '本地排序')}</span>
+      </h2>
+      <div class="outfit">
+        ${o.items.map(it => `
+          <div class="oi">
+            ${thumbHtml(it)}
+            <div class="oi-info">
+              <div class="oi-nm">${colorDot(it.color_hex)}${esc(it.name)}</div>
+              <div class="oi-meta">${esc(slotName(it.slot))} · ${esc(it.category || '')}
+                ${it.is_signature ? '<span class="tag ok">本命</span>' : ''}</div>
+              <!-- 两个动作**都是按件**的：「洗了」是这件今天不穿，
+                   「不喜欢」是这件本身不喜欢（累计多次 → 体检页提示淘汰）。
+                   并排放但用不同颜色/线型分开，避免手指点错。 -->
+              <div class="oi-acts">
+                <button class="wash" data-wash="${it.id}"
+                        title="这件今天不参与搭配">洗了</button>
+                <button class="dislike" data-dislike="${it.id}"
+                        title="不喜欢这件（不是这一整套）">不喜欢</button>
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>
+
+      <div class="reason">${esc(o.llm_reason || o.reason)}</div>
+      ${(o.notes && o.notes.length) ? `<div class="note">${o.notes.map(esc).join(' · ')}</div>` : ''}
+      ${data.llm_error ? `<div class="note" style="color:var(--red)">
+        模型没排上序：${esc(data.llm_error)}<br>这次用的是本地排序。
+        <a href="/settings">去设置</a>看一眼。
+      </div>` : ''}
+
+      <!-- 主按钮占满余宽：这一屏的动作只有一个（就是它），
+           三个按钮等宽会让人不知道该点哪个。 -->
+      ${isFuture ? `
+        <div class="note" style="margin-top:12px">
+          这是 <b>${esc(dateText(curDate))}</b> 的样子 —— 到了那天早上再点「就穿这套」。
+          现在可以「换一批」看看那天还有别的什么穿法。
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" data-act="skip" style="flex:1">换一批</button>
+          <button class="btn" data-act="today-view">回到今天</button>
+        </div>`
+      : `
+        <div class="row actrow">
+          <button class="btn ok" data-act="wear" style="flex:1">就穿这套</button>
+          <button class="btn" data-act="skip">换一批</button>
+        </div>
+
+        <!-- 穿完之后的体感。它调的是**舒适线**（你整体怕不怕冷），不是某件衣服的厚薄：
+             一次"这套冷"分不清是"你更怕冷"还是"这件估薄了"，先动那个一维的旋钮。 -->
+        <div class="row feelrow">
+          <span class="feel-lb">穿了一天，感觉？</span>
+          <button class="feellink" data-feel="cold">偏冷</button>
+          <button class="feellink" data-feel="hot">偏热</button>
+        </div>`}
+      <div class="note" id="fbmsg"></div>
+    </div>`;
+
+  /* 备选：服装是视觉品类，让人读一长串衣服名再凭想象选，是"不符合用户习惯"的典型。
+     左边直接给这一套的 5 张真实缩略图，右边只剩分数和一句"跟上面差在哪"。 */
+  // ⚠️ 只有「本地排序」时分数才是排序依据，显示它才不矛盾。
+  // 模型排过序时分数跟先后无关 —— 上一版照原样印出来，
+  // 用户看到「第 1 套 80.27 分」压着「第 2 套 80.75 分」，第一反应就是"这排序坏了"。
+  $('#alts').innerHTML = data.outfits.length > 1 ? `
+    <div class="card">
+      <h2>或者这些（同一个温度都能穿）</h2>
+      ${data.outfits.map((x, i) => `
+        <div class="alt${i === idx ? ' on' : ''}" data-i="${i}">
+          <div class="altstrip">
+            ${x.items.map(it => it.img_display
+              ? `<img src="${esc(it.img_display)}" alt="">`
+              : `<div class="ph"></div>`).join('')}
+          </div>
+          <div class="altbody">
+            <div class="alt-h">第 ${i + 1} 套${
+              byLlm ? '' : ` <span class="muted">${Math.round(x.score)} 分</span>`}</div>
+            <div class="alt-line">${esc(altDiff(o, x))}</div>
+          </div>
+        </div>`).join('')}
+      <div class="note">点一下就能换到上面看。都是你衣橱里真实存在的组合，不是「建议你买一件」。
+        ${byLlm ? '顺序是模型按整体观感排的 —— 分数只保证「穿得出门」，不表示好看，所以这里不给分数。' : ''}</div>
+    </div>` : '';
+
+  // 「这些今天穿不上」已搬去体检页（第一眼不该是这个温度用不到的件）。
+  renderMySets(data);
+  renderLaundry(data);
+}
+
+/* 跟当前这套差在哪。只报"换了几件、换成什么" ——
+   名字一长串读起来累，缩略图已经在左边了。 */
+function altDiff(cur, other) {
+  const have = new Set((cur.items || []).map(it => it.id));
+  const added = (other.items || []).filter(it => !have.has(it.id));
+  if (!added.length) return '就是这一套的单品';
+  const names = added.slice(0, 2).map(it => it.name).join('、');
+  return `换了 ${added.length} 件 · ${names}${added.length > 2 ? ' 等' : ''}`;
+}
+
+/* 洗衣篮。
+   它是一条**状态提示**，不是一个功能面板 —— 所以做得尽量轻：
+   一行字 + 一个「全部恢复」。
+   每件衣服的名字本身是个按钮，点一下**单件放回**（误点了、或者先干的先收回来）。 */
+/* ══════════ 旅行模式（随身清单）══════════
+   人在外面那几天，衣橱里大半的衣服**根本不在身边**。这一屏原本只认完整衣橱，
+   于是推出来的全是留在家里的大衣 —— 用户只能一件件点「洗了」手工排掉，
+   而且第二天打开又要重来一遍。
+
+   清单从哪来：计划页排完一趟行程，会把**它实际带的那几件**连同逐天温度一起
+   存进 localStorage（`capsule.trips[].items`）。所以这里只做"挑一趟 + 开/关"，
+   **不重排一遍** —— 重排要重新查天气，而旅程一旦过了预报期就取不到温度，
+   那时这个功能反而不可用；存下来的清单则永远可用（带出去哪几件不随天气变）。 */
+
+const LS_TRIP = 'capsule.trips';
+
+function savedTrips() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_TRIP));
+    return (Array.isArray(v) ? v : []).filter(t => t && (t.items || []).length);
+  } catch (e) { return []; }
+}
+
+/** 2026-10-16 → 10/16。状态条那一行要装下"哪趟 + 几天 + 几件"，日期必须短。 */
+function fmtMD(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${Number(m[2])}/${Number(m[3])}` : String(iso || '');
+}
+
+/* 「围绕某件搭」的常驻入口/状态。
+   没选 = 入口（点了展开「调」面板并聚焦到那一条）；选了 = 状态 + 清除。 */
+function renderAnchorBar(a) {
+  const bar = $('#anchorbar');
+  if (!bar) return;
+  if (a && a.id) {
+    bar.innerHTML = `<span class="atag">围绕这件</span>`
+      + `<span class="atext">${esc(a.name)}</span>`
+      + `<button class="aclear" id="anchorClearTop">清除</button>`;
+  } else {
+    bar.innerHTML = `<button class="abtn" id="anchorOpen">`
+      + `围绕某件搭 —— 挑一件你喜欢的，只出含它的搭配 ›</button>`;
+  }
+}
+
+$('#anchorbar').addEventListener('click', async (e) => {
+  if (e.target.closest('#anchorClearTop')) {
+    const sel = $('#anchor');
+    if (sel) sel.value = '';
+    const n = $('#anchornote');
+    if (n) n.hidden = true;
+    await fetchToday({ reroll: false });
+    return;
+  }
+  if (e.target.closest('#anchorOpen')) {
+    togglePanel(true);
+    await loadAnchorOptions();
+    const sel = $('#anchor');
+    if (sel) {
+      if (sel.focus) sel.focus();
+      if (sel.scrollIntoView) sel.scrollIntoView({ block: 'center' });
+    }
+  }
+});
+
+function renderKit(k) {
+  const bar = $('#kitbar');
+  if (!bar) return;
+  const sheet = $('#kitsheet');
+  if (sheet) sheet.hidden = true;
+
+  if (k) {
+    // 开着的时候必须**一眼看出"现在推的不是全部衣服"** —— 否则会以为衣橱坏了。
+    // ⚠️ 顺序：说明文字放最后（它 `flex:1 0 100%` 独占第二行），
+    //    否则长文案会把「退出」挤到第三行去。
+    bar.hidden = false;
+    const span = k.start && k.end && k.end !== k.start
+      ? `${fmtMD(k.start)}–${fmtMD(k.end)}` : fmtMD(k.start || '');
+    bar.innerHTML = `<span class="kittag">旅行模式</span>`
+      + `<button class="kitbtn" id="kitExit">退出</button>`
+      + `<span class="kittext">只从 <b>${k.n_items}</b> 件里挑 —— ${esc(k.label)}`
+      + `${span ? ' · ' + esc(span) : ''}</span>`;
+    return;
+  }
+
+  const trips = savedTrips();
+  if (!trips.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = `<button class="kitbtn" id="kitOpen">出门只带了这几件？开启旅行模式</button>`;
+}
+
+function openKitSheet() {
+  const sheet = $('#kitsheet');
+  const trips = savedTrips();
+  if (!sheet || !trips.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  sheet.hidden = false;
+  sheet.innerHTML = `
+    <h2>选一趟排过的行程 <span class="muted" style="font-weight:400;font-size:12px">这几天只从它带的衣服里挑</span></h2>
+    ${trips.map((t, i) => `
+      <div class="partner">
+        <div class="nm">${esc(t.label || t.key || '行程')}
+          <div class="muted" style="font-size:12px">${esc(
+            (t.segs || []).map(s => s.city || s.label).join(' › '))} · 共 ${t.n_days || '?'} 天 · 带 ${(t.items || []).length} 件</div>
+        </div>
+        <button class="btn sm primary" data-kit="${i}">用这趟</button>
+      </div>`).join('')}
+    <div class="grid2" style="margin-top:10px">
+      <div><label>出发日期</label><input type="date" id="kitStart" value="${today}"></div>
+    </div>
+    <div class="note">开启之后，首页只会从<b>这趟带的衣服</b>里挑 —— 不用再一件件点「洗了」。
+      随时可以退出，不影响衣橱本身。</div>
+    <div class="row" style="margin-top:10px"><button class="btn" id="kitCancel">取消</button></div>`;
+}
+
+async function useKit(i) {
+  const t = savedTrips()[i];
+  if (!t) return;
+  const el = $('#kitStart');
+  const start = (el && el.value) || new Date().toISOString().slice(0, 10);
+  const nDays = t.n_days || (t.segs || []).reduce((a, s) => a + (Number(s.days) || 1), 0) || 1;
+  try {
+    await API.post('/api/kit', {
+      label: t.label || t.key || '旅行', start, n_days: nDays,
+      item_ids: t.items || [], temps: t.temps || [],
+    });
+  } catch (e) { toast('没开成：' + (e && e.message ? e.message : e)); return; }
+  toast('旅行模式已开 —— 只从这趟带的衣服里挑');
+  await fetchToday({ reroll: false });
+}
+
+async function exitKit() {
+  try { await API.del('/api/kit'); }
+  catch (e) { toast('没退成：' + (e && e.message ? e.message : e)); return; }
+  toast('已退出旅行模式，回到完整衣橱');
+  await fetchToday({ reroll: false });
+}
+
+$('#kitbar').addEventListener('click', async e => {
+  if (e.target.closest('#kitOpen')) { openKitSheet(); return; }
+  if (e.target.closest('#kitExit')) { await exitKit(); }
+});
+
+$('#kitsheet').addEventListener('click', async e => {
+  const pick = e.target.closest('[data-kit]');
+  if (pick) { await useKit(Number(pick.dataset.kit)); return; }
+  if (e.target.closest('#kitCancel')) { $('#kitsheet').hidden = true; }
+});
+
+function renderLaundry(data) {
+  const el = $('#laundry');
+  const rows = (data && data.washed) || [];
+  if (!rows.length) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="row" style="flex-wrap:nowrap;gap:10px">
+      <div style="flex:1;min-width:0;font-size:14px;letter-spacing:.01em">
+        洗衣篮 <b>${rows.length}</b> 件<span class="muted"> · 今天不参与搭配</span>
+      </div>
+      <button class="btn sm" data-act="unwash-all">全部恢复</button>
+    </div>
+    <div class="wash-chips">
+      ${rows.map(it => `<button class="wash-chip" data-unwash="${it.id}"
+        title="点一下把这一件放回来">${esc(it.name)}</button>`).join('')}
+    </div>`;
+}
+
+/* 我搭的套装。
+   它跟上面那三套不是一回事：那三套是算出来的，这几套是你自己挑的。
+   所以单独一张卡、不占推荐的 3 个名额 —— 自己写的答案不该跟它抢位置。
+   能不能穿是后端现算的（引擎枚举），这里只管画。 */
+function renderMySets(data) {
+  const el = $('#mysets');
+  const rows = data.sets || [];
+  if (!rows.length) {
+    // 套装已从底栏降级（底栏 6→5）：0 套时这里就是唯一入口，不能再整个藏掉。
+    el.hidden = false;
+    el.innerHTML = `
+      <h2>我搭的套装</h2>
+      <div class="muted" style="font-size:13px">还没存过套装 —— 把常一起穿的衣服固定成一套，到了能穿的温度它会自己出现。</div>
+      <div class="row" style="margin-top:10px"><a class="btn sm" href="/sets">去搭第一套</a></div>`;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = `
+    <h2>我搭的套装 <span class="tag info">${rows.length} 套能穿</span></h2>
+    ${rows.map(s => `
+      <div class="setrow">
+        <div class="sh">
+          <span class="sn">${esc(s.set_name || '我的套装')}</span>
+          <span class="tag">${s.items.length} 件</span>
+        </div>
+        <div class="strip" style="margin-top:7px">
+          ${s.items.map(it => `
+            <div class="si">
+              ${it.img_display
+                ? `<img src="${esc(it.img_display)}" alt="">`
+                : `<div class="ph">${esc(slotName(it.slot))}</div>`}
+              <div class="n">${esc(it.name)}</div>
+            </div>`).join('')}
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn sm ok" data-set-wear="${s.set_id}">今天穿这套</button>
+        </div>
+      </div>`).join('')}
+    <div class="note">这几套是你自己挑的。到了能穿的温度才会出现在这儿，
+      点一下直接记上（跟穿推荐的那几套一样，都进穿着记录）。
+      <a href="/sets">去改 / 再加一套</a>
+    </div>`;
+}
+
+function renderGuide(show) {
+  const g = $('#guide');
+  if (!show) { g.hidden = true; return; }
+  g.hidden = false;
+  g.innerHTML = `
+    <h2>三步开始用</h2>
+    <div class="steps">
+      <div class="step"><b>1</b><div>去「录入」把常穿的衣服拍进来。<b>每件点一下槽位就行</b>，其余字段自动填。</div></div>
+      <div class="step"><b>2</b><div>回来这一屏，温度已经是今天的气温了 —— 不对再点「调」改一下。</div></div>
+      <div class="step"><b>3</b><div>它给你几套能直接穿出门的。穿完点「就穿这套」，它会越用越懂你。</div></div>
+    </div>
+    <div class="row" style="margin-top:10px"><a class="btn primary" href="/wardrobe">去录入</a></div>`;
+}
+
+/* 空态：说清是哪一层卡住了，而不是让用户自己猜。
+   这一块以前只会说"多半是某一层缺件"，等于把问题丢回给用户。 */
+/* 「围绕某件搭」搭不出来。**这不是故障**，是条件冲突 ——
+   含糊地说一句"搭不出来"，用户不知道该改什么，所以按原因分两句话。 */
+function renderAnchorEmpty(data) {
+  const nm = (data.anchor && data.anchor.name) || '这件';
+  const h = data.anchor_hint || {};
+  let why;
+  if (h.kind === 'temp') {
+    why = `它在 ${h.temp_min}~${h.temp_max}℃ 才穿得上，现在是 ${data.temp}℃。
+           把温度调到它的范围，或者换个锚定单品。`;
+  } else if (h.kind === 'pair') {
+    why = `这个条件下没有能和它配成完整一套的单品。
+           换个场合试试，或者先取消锚定、看整体搭配。`;
+  } else if (h.kind === 'missing') {
+    why = '它已经不在衣橱里了（可能被删了）。';
+  } else {
+    why = '当前条件下排不出含它的搭配。';
+  }
+  return `<div class="card"><div class="empty">
+      围绕「${esc(nm)}」搭不出来<br>
+      <span class="muted" style="font-size:13px">${why}</span><br><br>
+      <button class="btn" id="anchorClear">取消围绕</button>
+    </div></div>`;
+}
+
+function renderNoOutfit(data) {
+  const d = data.diag || {};
+  const near = d.nearest_temp;
+  const rows = (d.layers || []).map(l => {
+    const bad = l.required && !l.eligible;
+    const mark = bad ? '✕' : (l.eligible ? '' : '—');
+    return `<div class="partner">
+      <div class="nm">${esc(l.name)}${l.required ? '' : ' <span class="muted">可选</span>'}</div>
+      <div class="cnt"${bad ? ' style="color:var(--red)"' : ''}>
+        ${l.eligible} / ${l.pool} 件合格 ${mark}
+      </div></div>`;
+  }).join('');
+
+  return `
+    <div class="card">
+      <h2>这个温度穿不出搭配</h2>
+      <div class="empty" style="padding:6px 0 2px">
+        ${esc(d.hint || '衣橱在这个温度 + 场合下没有合法组合。')}
+      </div>
+      ${rows}
+      ${data.n_washed ? `<div class="note">其中 <b>${data.n_washed}</b> 件正在洗涤中 ——
+        放回来可能就有解了（下面那条「全部恢复」）。</div>` : ''}
+      ${near != null ? `
+        <div class="row" style="margin-top:12px">
+          <button class="btn primary" data-act="jumptemp" data-t="${near}">
+            把温度调到 ${near}℃ 看看
+          </button>
+        </div>` : ''}
+      <div class="row" style="margin-top:10px">
+        <a class="btn" href="/wardrobe">去录入</a>
+        <a class="btn" href="/stats">衣橱体检</a>
+      </div>
+    </div>`;
+}
+
+/* ══════════ 交互 ══════════ */
+
+$('#hero').addEventListener('click', async (e) => {
+  // 空态里的「取消围绕」：把锚定清掉，回到整个衣橱
+  if (e.target.closest('#anchorClear')) {
+    const sel = $('#anchor');
+    if (sel) sel.value = '';
+    const note = $('#anchornote');
+    if (note) note.hidden = true;
+    await fetchToday({ reroll: false });
+    return;
+  }
+
+  // 「不喜欢」先处理：它是**按件**的（不是这一套），跟搭配反馈无关。
+  const dis = e.target.closest('[data-dislike]');
+  if (dis) { await dislikeItem(Number(dis.dataset.dislike), dis); return; }
+
+  // 穿完的体感：偏冷 / 偏热 → 调舒适线
+  const fil = e.target.closest('[data-feel]');
+  if (fil) { await sendFeel(fil.dataset.feel, fil); return; }
+
+  // 「洗了」：它跟搭配反馈无关，而且这个按钮就长在反馈按钮上方一格
+  const w = e.target.closest('[data-wash]');
+  if (w) { await setWashed(Number(w.dataset.wash), true, w); return; }
+
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+
+  // 空态里的"把温度调到 N℃"跟搭配反馈无关，先处理掉
+  if (act === 'jumptemp') {
+    const t = Number(btn.dataset.t);
+    if (!Number.isFinite(t)) return;
+    setTemp(t);
+    return;
+  }
+
+  // 在看"往后几天"时给的出路：回到今天（同时把日期和温度一起还原）。
+  if (act === 'today-view') {
+    curDate = '';
+    const d0 = tlData && tlData.days.find(x => x.is_today);
+    if (d0) { $('#temp').value = d0.temp; paintTemp(); }
+    renderTimeline();
+    fetchToday({ reroll: false });
+    return;
+  }
+
+  const o = data && data.outfits && data.outfits[idx];
+  if (!o) return;
+
+  // 没落库的搭配没法挂反馈（save=false 的情况）
+  if (!o.outfit_id) { toast('这套没落库，先刷新一下'); return; }
+
+  const gesture = act === 'wear' ? 'auto_worn' : 'skipped';
+  try {
+    await API.post('/api/today/feedback', { outfit_id: o.outfit_id, gesture });
+  } catch (err) {
+    toast('记录失败：' + err.message);
+    return;
+  }
+
+  if (act === 'wear') {
+    $('#fbmsg').textContent = '记下了 —— 这几件今天的穿着次数 +1，之后会优先给你没穿过的组合。';
+    toast('已记录，今天这套锁定');
+    await fetchToday({ reroll: false });
+    return;
+  }
+  /* 底部不再有「整套不喜欢」：不喜欢是**按件**的（每件衣服自己那一行），
+     见 dislikeItem()。这里只剩「换一批」= skipped（整套级信号，喂成对权重）。 */
+  await fetchToday({ reroll: true });
+});
+
+/* ══════════ 洗衣篮 ══════════
+   「洗了」= 这件今天不参与搭配。**只影响这一屏** ——
+   计划页的一周 / 旅行照旧按"你衣柜里有什么"排（后端只在 `/api/today`
+   这一条路径上剔除，见 app/main.py 里那段注释）。 */
+
+/* 「不喜欢」一件衣服（**不是这一套**）。
+   按件记账 → 权重降一点（单次不打死，见 outfits.py 的 Beta 说明）；
+   累计到阈值才提一句"要不要淘汰"—— 每点一次都念会很烦。 */
+async function dislikeItem(id, btn) {
+  if (!Number.isFinite(id)) return;
+  if (btn) btn.disabled = true;
+  let r = null;
+  try {
+    r = await API.post('/api/items/' + id + '/dislike', {});
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    toast('没记上：' + (err && err.message ? err.message : err));
+    return;
+  }
+  const n = r && r.dislike_n;
+  const at = (r && r.hint_at) || 3;
+  const kk = r && r.kit;
+  let msg = `已把「${r.name}」从今天的搭配里排掉`;
+  if (kk && kk.emptied) msg += '；这趟清单空了，已退出旅行模式';
+  else if (kk) msg += `；也丢出了这趟清单（还剩 ${kk.n_items} 件）`;
+  if (n >= at) msg += ` —— 已经 ${n} 次了，体检页有「待淘汰」清单`;
+  toast(msg);
+  // **必须重排**：这件已经从候选里排掉了（用户要的就是"不能包含这一件"），
+  // 页面还留着它反而是前后不一致。要放回来去下面那张「今天不喜欢」卡。
+  await fetchToday({ reroll: false });
+}
+
+/* 穿完的体感：偏冷 / 偏热。
+   动的是**舒适线**（prefs.comfort），不是某件衣服的保暖值 —— 理由见 app/feel.py。
+   ⚠️ 记完**不重排**：用户正在看这一套，你因为他说了句"有点冷"就把搭配全换掉，
+   会让人以为点错了。改到的数在 toast 里说清楚，下次刷新自然生效。 */
+async function sendFeel(verdict, btn) {
+  const o = data && data.outfits && data.outfits[idx];
+  if (!o || !o.outfit_id) { toast('这套没落库，先刷新一下'); return; }
+  if (btn) btn.disabled = true;
+  let r = null;
+  try {
+    r = await API.post('/api/feel', {
+      outfit_id: o.outfit_id, verdict, temp: Number($('#temp').value),
+    });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    toast('没记上：' + (err && err.message ? err.message : err));
+    return;
+  }
+  if (btn) btn.disabled = false;
+  const moved = Number(r && r.moved) || 0;
+  if (!moved) {
+    // 已经顶到上下限（18 / 28℃）—— 不说清楚的话，用户会以为点了没反应
+    toast(`舒适线已经到头了（${r.comfort_after}℃），再调就没意义了`);
+    return;
+  }
+  const dir = verdict === 'cold' ? '更怕冷' : '更耐热';
+  toast(`记下了 —— 按「你${dir}」算：舒适线 ${r.comfort_before} → ${r.comfort_after}℃`);
+}
+
+async function setWashed(id, washed, btn) {
+  if (!Number.isFinite(id)) return;
+  if (btn) btn.disabled = true;
+  try {
+    await API.post('/api/laundry', { item_id: id, washed });
+  } catch (err) {
+    // 绝不静默失败：按钮恢复可点，并把原因说出来
+    if (btn) btn.disabled = false;
+    toast('没改成：' + (err && err.message ? err.message : err));
+    return;
+  }
+  // 重算一遍 —— 洗掉的那件就不在搭配里了。这才是"不会再搭配这件"。
+  await fetchToday({ reroll: false });
+}
+
+/* 今天「不喜欢」掉的件。**必须给恢复入口** —— "不喜欢"是可以反悔的，
+   没有出口的话点错一件就只能等明天（那是把用户关在门外）。
+   样式复用洗衣篮那套 chips，不另起一套视觉语言。 */
+function renderAvoided(data) {
+  const el = $('#avoided');
+  if (!el) return;
+  const rows = (data && data.avoided) || [];
+  if (!rows.length) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="row" style="flex-wrap:nowrap;gap:10px">
+      <div style="flex:1;min-width:0;font-size:14px;letter-spacing:.01em">
+        今天不喜欢 <b>${rows.length}</b> 件<span class="muted"> · 已从搭配里排掉</span>
+      </div>
+      <button class="btn sm" data-act="unavoid-all">全部恢复</button>
+    </div>
+    <div class="wash-chips">
+      ${rows.map(it => `<button class="wash-chip" data-unavoid="${it.id}"
+        title="点一下放回今日候选">${esc(it.name)}</button>`).join('')}
+    </div>`;
+}
+
+async function unAvoid(id, btn) {
+  try { await API.del('/api/avoid/' + id); }
+  catch (err) {
+    if (btn) btn.disabled = false;
+    toast('没恢复成：' + (err && err.message ? err.message : err));
+    return;
+  }
+  await fetchToday({ reroll: false });
+}
+
+$('#avoided').addEventListener('click', async (e) => {
+  const one = e.target.closest('[data-unavoid]');
+  if (one) { await unAvoid(Number(one.dataset.unavoid), one); return; }
+  const all = e.target.closest('[data-act]');
+  if (!all || all.dataset.act !== 'unavoid-all') return;
+  all.disabled = true;
+  try {
+    const cur = await API.get('/api/avoid');
+    for (const it of (cur.items || [])) await API.del('/api/avoid/' + it.id);
+  } catch (err) {
+    all.disabled = false;
+    toast('恢复失败：' + (err && err.message ? err.message : err));
+    return;
+  }
+  toast('都放回来了');
+  await fetchToday({ reroll: false });
+});
+
+$('#laundry').addEventListener('click', async (e) => {
+  // 先判单件（它的属性名跟「全部恢复」不是同一个），再判整条
+  const one = e.target.closest('[data-unwash]');
+  if (one) { await setWashed(Number(one.dataset.unwash), false, one); return; }
+
+  const all = e.target.closest('[data-act]');
+  if (!all || all.dataset.act !== 'unwash-all') return;
+  all.disabled = true;
+  try {
+    await API.post('/api/laundry/reset', {});
+  } catch (err) {
+    all.disabled = false;
+    toast('恢复失败：' + (err && err.message ? err.message : err));
+    return;
+  }
+  toast('都放回来了');
+  await fetchToday({ reroll: false });
+});
+
+$('#alts').addEventListener('click', (e) => {
+  const el = e.target.closest('.alt');
+  if (!el) return;
+  idx = Number(el.dataset.i);
+  render();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+/* 「今天穿这套」—— 自己搭的套装。
+   走的是后端 /api/sets/{id}/use：落一条 outfit 记录 + auto_worn，
+   和推荐那几条**完全同一条反馈路径**，所以穿着次数和权重都照常累加。 */
+$('#mysets').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-set-wear]');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '记着…';
+  try {
+    const r = await API.post('/api/sets/' + btn.dataset.setWear + '/use', {
+      temp: Number($('#temp').value) || 20,
+      occasion: $('#occ').value || null,
+    });
+    toast(`穿上了「${r.name}」—— 这几件今天的穿着次数 +1`);
+    // ⚠️ 这里**不能**先占用全局 busy：fetchToday 开头就 `if (busy) return`，
+    // 那样这次刷新会被自己吞掉（"点了没反应"的经典写法）。
+    await fetchToday({ reroll: false });
+  } catch (err) {
+    toast('没记上：' + err.message);
+  } finally {
+    // 刷新成功后这张卡会被整块重画、按钮已经不是原来那个了 ——
+    // 只有还连着文档时才需要恢复（否则会写到一个已经扔掉的节点上）。
+    if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+  }
+});
+
+boot();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs('today'));</script>
+</body>
+</html>

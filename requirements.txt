@@ -1,0 +1,8 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pillow>=10.0
+python-multipart>=0.0.9
+
+# 手机访问二维码（scripts/phone_qr.py 用）。纯 Python 无额外依赖。
+# 不装也不影响应用运行，只是 phone-url.bat 不会生成二维码、只打印网址。
+segno>=1.6

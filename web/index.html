@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>衣橱体检</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>衣橱体检</h1>
+  <span class="sub" id="sub"></span>
+</div>
+
+<div class="wrap">
+  <div class="card">
+    <!-- 和「今日」页同一套温控形态：步进器而不是滑杆。
+         上一版这里是 grid2 左半格里的一根窄条（约 200px），
+         和今日页 CSS 注释里声明已修掉的那个问题一模一样 —— 跨页不一致。 -->
+    <label style="margin-top:2px">按几度看这一屏</label>
+    <div class="stepper">
+      <button id="tminus" aria-label="低一度">−</button>
+      <span class="sv" id="tempv">20℃</span>
+      <button id="tplus" aria-label="高一 度">+</button>
+    </div>
+    <input type="hidden" id="temp" value="20">
+    <label for="occ">场合</label>
+    <select id="occ"><option value="">不限</option></select>
+    <div class="note">
+      <b>层数是算出来的，不是日历上写死的</b>：用「26℃穿衣法则」——
+      <code>当日气温 + 衣服的保暖值之和 ≥ 体感舒适温度</code>。
+      你的衣服越暖，需要叠的层就越少。保暖值和舒适线都在「设置」里能改。
+    </div>
+  </div>
+
+  <div class="card" id="hero"><div class="muted">计算中 <span class="spin"></span></div></div>
+
+  <div class="card">
+    <h2>各温度的搭配空间</h2>
+    <div id="curve"><div class="muted">计算中 <span class="spin"></span></div></div>
+  </div>
+
+  <div class="card">
+    <h2>枢纽件 · 删了会崩</h2>
+    <div id="hinges"><div class="muted">计算中 <span class="spin"></span></div></div>
+  </div>
+
+  <div class="card">
+    <h2>一件都搭不上</h2>
+    <div id="islands"><div class="muted">计算中 <span class="spin"></span></div></div>
+    <div class="note">这些衣服在当前温度下，一件都进不了任何搭配。该考虑的是它们，不是「看起来旧」的那件。</div>
+  </div>
+
+  <div class="card" id="inact">
+    <h2>换个温度就能穿</h2>
+    <div id="inactive"><div class="muted">计算中 <span class="spin"></span></div></div>
+  </div>
+
+  <div class="card">
+    <h2>它在慢慢懂你</h2>
+    <div id="learn"><div class="muted">计算中 <span class="spin"></span></div></div>
+  </div>
+
+  <!-- 体感校准：把「偏冷/偏热」反馈变成看得见的东西 -->
+  <div class="card" id="feelCard" hidden>
+    <h2>体感校准</h2>
+    <div id="feel"></div>
+    <div class="note">
+      点「偏冷 / 偏热」时，调的是<b>舒适线</b>（你整体怕不怕冷），<b>不是某件衣服的厚薄</b> ——
+      一次"这套冷"分不清是"你更怕冷"还是"这件估薄了"，所以先动那个一维的旋钮。
+      下面那几件只是<b>线索</b>：要不要改它们的保暖值，由你定。
+    </div>
+  </div>
+
+  <div class="card" id="dislikeCard" hidden>
+    <h2>待淘汰观察</h2>
+    <div id="disliked"></div>
+    <div class="note">
+      这些是<b>反复出现在你点过「不喜欢」的搭配里</b>的衣服。
+      要和右边的 ΔN 一起看：<b>ΔN 高</b>说明它是刚需，该改的是「怎么搭」而不是扔掉它；
+      <b>ΔN 接近 0</b>（删了不损失任何组合）才是真的可以清出去。
+      这里只给线索，<b>不会替你删</b> —— 要删去「录入」页逐件删。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>单次穿着成本 CPW</h2>
+    <div id="cpw"><div class="muted">计算中 <span class="spin"></span></div></div>
+    <div class="note">CPW = 购入价 ÷ 穿着次数。头三个月的高价单品 CPW 必然难看，别急着做决策。</div>
+  </div>
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let meta = null;
+
+const T_MIN = -8, T_MAX = 36;      // 和「今日」页保持一致
+
+function paintTemp() {
+  const t = Number($('#temp').value);
+  if (!Number.isFinite(t)) return;
+  $('#tempv').textContent = t + '℃';
+  $('#tminus').disabled = t <= T_MIN;
+  $('#tplus').disabled = t >= T_MAX;
+}
+
+function nudgeTemp(d) {
+  const v = Math.min(T_MAX, Math.max(T_MIN, Number($('#temp').value) + d));
+  if (!Number.isFinite(v)) return;
+  $('#temp').value = v;
+  paintTemp();
+  refresh();
+}
+
+async function boot() {
+  meta = await loadMeta();
+  $('#occ').innerHTML = '<option value="">不限</option>' + option(meta.occasions, '');
+  $('#tminus').addEventListener('click', () => nudgeTemp(-1));
+  $('#tplus').addEventListener('click', () => nudgeTemp(1));
+  $('#occ').addEventListener('change', refresh);
+  // 舒适线一键回到默认 —— 学歪了要能退回去，否则用户只能去 /settings 手改
+  document.addEventListener('click', async (e) => {
+    if (!e.target.closest('#comfortReset')) return;
+    e.preventDefault();
+    try {
+      await API.post('/api/feel/reset', {});
+      await refresh();
+    } catch (err) {
+      $('#feel').insertAdjacentHTML('afterbegin',
+        `<div class="note" style="color:var(--red)">没重置成功：${esc(err.message)}</div>`);
+    }
+  });
+  // 「它在慢慢懂你」跟温度无关，只取一次；失败就留空态，不让它拖垮整页。
+  try { renderLearn(await API.get('/api/today/stats')); }
+  catch (e) { $('#learn').innerHTML = `<div class="muted">取不到反馈记录：${esc(e.message)}</div>`; }
+  refresh();
+}
+
+async function refresh() {
+  const temp = $('#temp').value, occ = $('#occ').value;
+  paintTemp();
+  const q = `temp=${temp}${occ ? '&occasion=' + encodeURIComponent(occ) : ''}`;
+  try {
+    const [stats, curve] = await Promise.all([
+      API.get('/api/stats?' + q + '&detail=true'),
+      API.get('/api/efficiency-curve' + (occ ? '?occasion=' + encodeURIComponent(occ) : '')),
+    ]);
+    renderHero(stats);
+    renderCurve(curve);
+    renderHinges(stats.hinges || [], stats.n_outfits);
+    renderIslands(stats.islands || []);
+    renderInactive(stats.inactive || []);
+    renderDisliked(stats.disliked || [], stats.dislike_threshold || 3);
+    renderFeel(stats.feel_flags || [], stats.comfort);
+    renderCpw(stats.cpw_ranking || []);
+    $('#sub').textContent = stats.empty ? '' : `${stats.n_items} 件在库`;
+  } catch (e) {
+    $('#hero').innerHTML = `<div class="verdict skip"><div class="text">${esc(e.message)}</div></div>`;
+  }
+}
+
+function renderHero(s) {
+  if (s.empty) {
+    $('#hero').innerHTML = `<div class="empty">衣橱还是空的<br><span class="muted">先到「录入」页把常穿的衣服加进来</span><br><br><a class="btn primary" href="/wardrobe">去录入</a></div>`;
+    $('#curve').innerHTML = $('#hinges').innerHTML = $('#islands').innerHTML = $('#cpw').innerHTML = '<div class="muted">—</div>';
+    return;
+  }
+  const d = Math.round((s.density || 0) * 100);
+  const cls = d >= 60 ? 'good' : (d >= 30 ? 'warn' : 'bad');
+  const f = s.capacity_factors || {};
+  const cap = s.core_capacity || 0;
+  // 先给结论、再给数：一句人话在最上面，百分比退到算式里。
+  const verdict = d >= 60
+    ? '你的衣服基本都能互相搭上 —— 再买新衣服，能变出的新穿法在变少。'
+    : (d >= 30
+      ? '一小半衣服搭不上，往下看「一件都搭不上」那栏是谁。'
+      : '一半以上的衣服在互相打架 —— 先别买，先看下面那栏。');
+  const formula = (f.tops != null && cap)
+    ? `<div class="metric wide">
+         <div class="k">理论上限怎么来的</div>
+         <div class="v">${f.tops} 件上衣 × ${f.bottoms} 条下装 × ${f.shoes} 双鞋
+           = <b>${cap}</b> 种可能</div>
+         <div class="muted" style="font-size:12px;margin-top:3px">
+           你实际搭得出 <b>${s.n_cores}</b> 种（${d}%）——
+           差的那 ${cap - s.n_cores} 种就是衣服之间互相打架的部分。</div>
+       </div>`
+    : '';
+  $('#hero').innerHTML = `
+    <h2>${s.temp}℃ 下的衣橱效率</h2>
+    <div class="verdict ${cls === 'good' ? 'buy' : (cls === 'warn' ? 'warn' : 'skip')}">
+      <div class="text">${verdict}</div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="k">核心组合</div><div class="v">${s.n_cores}</div></div>
+      <div class="metric"><div class="k">组合密度</div><div class="v ${cls}">${d}%</div></div>
+      <div class="metric"><div class="k">叠穿变体</div><div class="v">${s.n_variants}</div></div>
+      <div class="metric"><div class="k">在库单品</div><div class="v">${s.n_items}</div></div>
+      <div class="metric"><div class="k">平均套/件</div><div class="v">${s.efficiency}</div></div>
+      <div class="metric"><div class="k">全年累计</div><div class="v">${s.total_all_season}</div></div>
+      ${formula}
+    </div>
+    <div class="note">
+      <b>核心组合</b> = 不重复的「上装 × 下装 × 鞋」个数。同一个核心下的多层叠穿算一种变体 ——
+      换一件打底衫、多穿一件被外套盖住的卫衣，都不算新穿法。<br>
+      <b>组合密度</b> = 核心组合 ÷ 理论上限。衣服越多它不会自动变大，
+      只有衣服之间真的更搭得上才会变大。
+    </div>`;
+}
+
+function renderCurve(rows) {
+  if (!rows.length) { $('#curve').innerHTML = '<div class="muted">—</div>'; return; }
+  const max = Math.max(...rows.map(r => r.n_outfits), 1);
+  $('#curve').innerHTML = rows.map(r => `
+    <div style="margin-bottom:9px">
+      <div style="display:flex;justify-content:space-between;font-size:13px">
+        <span>${r.temp}℃ <span class="muted">${r.layers} 层</span></span>
+        <span><b>${r.n_outfits}</b> 个核心 <span class="muted">· 密度 ${Math.round((r.density || 0) * 100)}%</span></span>
+      </div>
+      <div class="bar"><i style="width:${(r.n_outfits / max * 100).toFixed(1)}%"></i></div>
+    </div>`).join('');
+}
+
+function renderHinges(rows, baseN) {
+  if (!rows.length) { $('#hinges').innerHTML = '<div class="muted">还没有能算出来的枢纽件。</div>'; return; }
+  const max = Math.max(...rows.map(r => r.delta_n), 1);
+  $('#hinges').innerHTML = rows.map(r => `
+    <div class="partner">
+      <div class="nm">${esc(r.name)} <span class="tag">${esc(slotName(r.slot))}</span>
+        <div class="bar" style="width:120px"><i style="width:${(r.delta_n / max * 100).toFixed(1)}%"></i></div>
+      </div>
+      <div class="cnt">−${r.delta_n} 核心</div>
+    </div>`).join('') +
+    `<div class="note">数字是删掉它会少掉几个核心组合。删一件枢纽件，整个衣橱的组合空间会塌一块。</div>`;
+}
+
+function renderIslands(rows) {
+  if (!rows.length) {
+    $('#islands').innerHTML = '<div class="tag ok">没有 —— 每件衣服都能参与搭配</div>';
+    return;
+  }
+  $('#islands').innerHTML = rows.map(r => `
+    <div class="partner">
+      ${colorDot(r.color_hex)}
+      <div class="nm">${esc(r.name)} <span class="muted">${esc(r.category || '')}</span></div>
+      <div class="cnt" style="color:var(--text3)">搭不上</div>
+    </div>`).join('');
+}
+
+/* 从「今日」页搬过来的：那两栏放在挑衣服的屏上是噪音，
+   体检页才是它们该在的地方。 */
+function renderInactive(rows) {
+  if (!rows || !rows.length) {
+    $('#inactive').innerHTML = '<div class="tag ok">这个温度下每件都能穿</div>';
+    return;
+  }
+  const head = rows.slice(0, 8);
+  $('#inactive').innerHTML = head.map(it => `
+    <div class="partner">
+      <div class="nm">${colorDot(it.color_hex)}${esc(it.name)}</div>
+      <div class="cnt">只适用 ${it.temp_min}~${it.temp_max}℃</div>
+    </div>`).join('') +
+    (rows.length > head.length ? `<div class="note">还有 ${rows.length - head.length} 件…</div>` : '') +
+    `<div class="note">它们不是丢了，是这个温度穿不上。把上面的温控调进它的区间就会出来 ——
+      羽绒服只在天冷时才进搭配。</div>`;
+}
+
+/* 待淘汰观察：「不喜欢」进算法之后的可视化。
+   ⚠️ 这里**只出清单、绝不出删除按钮** —— 被拒是"整套"被拒，单件只是线索；
+   要不要淘汰是人拍板的事（ΔN 提供第二维证据）。 */
+function renderDisliked(rows, threshold) {
+  const card = $('#dislikeCard');
+  if (!card) return;
+  if (!rows || !rows.length) { card.hidden = true; return; }
+  card.hidden = false;
+  $('#disliked').innerHTML = rows.slice(0, 10).map(r => {
+    const hot = r.reject_count >= threshold;
+    const dn = r.delta_n > 0
+      ? `<span class="tag warn">删了少 ${r.delta_n} 套组合</span>`
+      : `<span class="tag ok">删了不损失组合</span>`;
+    return `<div class="partner${hot ? ' revive' : ''}">
+      <div class="nm">${esc(r.name)}
+        <div class="muted" style="font-size:12px">${esc(slotName(r.slot))} · ${esc(r.category || '')}</div>
+        <div class="muted" style="font-size:12px;margin-top:3px">被拒搭配里出现 <b>${r.reject_count}</b> 次</div>
+      </div>
+      <div class="cnt">${dn}</div>
+    </div>`;
+  }).join('') + (rows.length > 10 ? `<div class="note">还有 ${rows.length - 10} 件…</div>` : '');
+}
+
+/* 体感校准：把「偏冷/偏热」变成看得见的东西。
+   ⚠️ 那几件只是**线索**，这一栏**不出"改保暖值"的按钮** ——
+   一次"这套冷"分不清是舒适线低还是这件估薄了，硬改单件等于用一次数据改永久参数。 */
+function renderFeel(flags, comfort) {
+  const card = $('#feelCard');
+  if (!card) return;
+  card.hidden = false;
+  const c = (comfort == null) ? null : Number(comfort);
+  const head = c == null ? '' : `
+    <div class="partner">
+      <div class="nm">当前舒适线 <b>${c.toFixed(1)}℃</b>
+        <div class="muted" style="font-size:12px">数值越大 = 越怕冷（要更多保暖才够）</div>
+      </div>
+      <div class="cnt"><button class="btn" id="comfortReset">回到默认 22℃</button></div>
+    </div>`;
+
+  const rows = (flags || []).map(r => {
+    const cold = r.cold || 0;
+    const hot = r.hot || 0;
+    const dir = cold >= hot ? `${cold} 次偏冷` : `${hot} 次偏热`;
+    const guess = cold >= hot ? '保暖值可能估低了' : '保暖值可能估高了';
+    return `<div class="partner">
+      <div class="nm">${esc(r.name)}
+        <div class="muted" style="font-size:12px">${esc(slotName(r.slot))} ·
+          当前保暖值 ${r.warmth == null ? '未填' : r.warmth}</div>
+        <div class="muted" style="font-size:12px;margin-top:3px">出现在 <b>${dir}</b> 的搭配里</div>
+      </div>
+      <div class="cnt"><span class="tag warn">${guess}</span></div>
+    </div>`;
+  }).join('');
+
+  $('#feel').innerHTML = head + (rows
+    ? rows
+    : `<div class="note" style="margin-top:6px">
+         还没有「偏冷 / 偏热」记录。在「今日」页穿完那套后点一下，这里就会开始攒。
+       </div>`);
+}
+
+function renderLearn(s) {
+  const el = $('#learn');
+  if (!s || !s.total) {
+    el.innerHTML = '<div class="muted">还没有反馈记录。在「今日」页点「就穿这套」或「跳过」，这里就会开始记。</div>';
+    return;
+  }
+  const g = s.gestures || {};
+  el.innerHTML = `
+    <div class="metrics">
+      <div class="metric"><div class="k">穿了你选的</div><div class="v">${g.auto_worn || 0}</div></div>
+      <div class="metric"><div class="k">跳过</div><div class="v">${g.skipped || 0}</div></div>
+      <div class="metric"><div class="k">不喜欢</div><div class="v">${g.rejected || 0}</div></div>
+    </div>
+    ${(s.down && s.down.length) ? `<h3>在降权的单品</h3>
+      ${s.down.map(d => `<div class="partner"><div class="nm">${esc(d.name)}</div>
+        <div class="cnt" style="color:var(--red)">${d.posterior}</div></div>`).join('')}` : ''}
+    ${(s.conflicts && s.conflicts.length) ? `<h3>发现这些件不该放一起</h3>
+      <div class="note">它们单独看都没问题，但放在同一套里你总不接受 —— 问题在这一对，不在任何一件上。</div>
+      ${s.conflicts.map(c => `<div class="partner"><div class="nm">${esc(c.a)} ＋ ${esc(c.b)}</div>
+        <div class="cnt" style="color:var(--red)">冲突</div></div>`).join('')}` : ''}
+    <div class="note">反馈存在本机，不上传。每一条都在改下一轮的排序。</div>`;
+}
+
+function renderCpw(rows) {
+  const withPrice = rows.filter(r => r.price);
+  if (!withPrice.length) {
+    $('#cpw').innerHTML = '<div class="muted">还没有填入购入价的单品。</div>';
+    return;
+  }
+  $('#cpw').innerHTML = withPrice.slice(0, 12).map(r => {
+    const bad = r.cpw != null && r.cpw > 100;
+    return `<div class="partner">
+      <div class="nm">${esc(r.name)}
+        <div class="muted" style="font-size:12px">穿 ${r.wear_count} 次 · 可参与 ${r.participations} 套</div>
+      </div>
+      <div class="cnt" style="${bad ? 'color:var(--red)' : ''}">${r.cpw == null ? '—' : '¥' + r.cpw + '/次'}</div>
+    </div>`;
+  }).join('');
+}
+
+boot();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs('stats'));</script>
+</body>
+</html>

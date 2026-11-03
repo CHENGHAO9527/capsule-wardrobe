@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>计划 · 一周 / 旅行</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>计划</h1>
+  <span class="sub" id="sub"></span>
+</div>
+
+<div class="wrap">
+
+  <!-- 排哪一段 -->
+  <div class="card">
+    <h2>排哪一段</h2>
+    <div class="seg" id="modeseg">
+      <button data-mode="week" class="on">一周</button>
+      <button data-mode="trip">旅行</button>
+    </div>
+    <div class="note" id="modehint"></div>
+
+    <div class="grid2" id="daygrid">
+      <div>
+        <label>从哪天开始</label>
+        <input type="date" id="start">
+      </div>
+      <!-- 分段旅行时这一格会收起来：天数归各段自己管（唯一状态源），
+           页面里绝不许同时存在两个能改天数的地方。 -->
+      <div id="ndaysBox">
+        <label>排几天</label>
+        <select id="ndays"></select>
+      </div>
+    </div>
+
+    <label>场合</label>
+    <select id="occ"></select>
+    <div class="note">
+      场合决定能选的正式度区间 —— 旅行时切成「休闲」更像出门的样子。
+    </div>
+    <!-- 自成一行。上一版把它塞在说明段落末尾，读起来像句子里的一个词。 -->
+    <div style="margin-top:10px">
+      <button class="btn sm" id="manual">我自己给温度</button>
+    </div>
+  </div>
+
+  <!-- 城市：一周模式是"你的城市"，旅行模式是"去哪儿" -->
+  <div class="card">
+    <h2 id="cityTitle">你的城市</h2>
+    <div class="note" id="cityNote"></div>
+    <div id="cityNow"></div>
+    <div class="row" style="margin-top:10px">
+      <input id="cityQ" placeholder="搜城市，比如 上海 / 京都 / 大理" style="flex:1;min-width:170px">
+      <button class="btn" id="cityGo">搜</button>
+    </div>
+    <div id="cityHits"></div>
+  </div>
+
+  <!-- 常用：搜过的城市（点一下就加成一段）+ 存过的行程（点一下按今天的天气重排）。
+       ⚠️ 只在旅行模式出现，而且是**纯本机缓存**（localStorage）——
+       行程是"你这个人在这个浏览器上的习惯"，不是衣橱数据，
+       不值得建表、更不该跟着账号同步。 -->
+  <div class="card" id="histCard" style="display:none">
+    <h2>常用</h2>
+    <div id="cityQuick"></div>
+    <div id="tripSaved"></div>
+  </div>
+
+  <!-- 必带：只在旅行模式出现。选了就一定会进箱子，而且不会被"少带件"砍掉。 -->
+  <div class="card" id="mustCard" style="display:none">
+    <h2>必带这几件</h2>
+    <div class="note">
+      选中的一定进箱子：<b>能穿就排进穿搭，穿不上也带着</b>，而且不会被「少带件」砍掉。
+    </div>
+    <div id="mustPick"><div class="muted">读取中 <span class="spin"></span></div></div>
+    <div class="note" id="mustNow"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button class="btn primary" id="run">排出来</button>
+      <button class="btn" id="reroll">换一批</button>
+    </div>
+    <div class="note" id="msg"></div>
+  </div>
+
+  <div id="result">
+    <div class="card"><div class="muted">读取中 <span class="spin"></span></div></div>
+  </div>
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let meta = null;
+let mode = 'week';
+let homeCfg = null;      // 常住城市（一周模式用，会存下来）
+// 目的地：一趟行程可以是**一段、也可以是几段**（京都 3 天 + 大阪 3 天）。
+// 一段都没有时就按常住城市的天气排 —— 那是加分段之前的老行为，一字不改。
+let segs = [];           // [{label, city, lat, lon, days}]，见 renderSegs
+let hits = [];           // 上一次城市搜索的结果
+
+/* ── 常用：搜过的城市 + 存过的行程（纯本机缓存，不进库）──────────────
+   用户原话："我每次只要有一点变动，再回到旅行界面，就要重新输入城市、
+   重新输入时间，我觉得这个就很折磨人。" 所以这两件事都必须能"点一下就有"。
+
+   ⚠️ 存的是**结构化字段**（city/lat/lon/days），不是把整份排好的结果缓存下来。
+   重排时天气要**现查** —— 缓存温度等于拿上个月的气温挑这个月的衣服，
+   而"更新一下气温信息再重排"正是用户要的效果。 */
+const LS_CITY = 'capsule.cities';
+const LS_TRIP = 'capsule.trips';
+const MAX_CITY = 8, MAX_TRIP = 6;
+
+function lsList(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : [];
+  } catch (e) { return []; }
+}
+function lsSave(key, list) {
+  // 存不进去（隐私模式 / 配额满）不该影响排行程 —— 静默降级成"没有常用"。
+  try { localStorage.setItem(key, JSON.stringify(list)); } catch (e) {}
+}
+
+/** 记一个"点过的城市"，下次直接点，不用再搜。 */
+function rememberCity(h) {
+  if (!h) return;
+  const one = { label: h.label, city: h.city, lat: h.lat, lon: h.lon };
+  const key = one.city || one.label;
+  const list = lsList(LS_CITY).filter(x => (x.city || x.label) !== key);
+  list.unshift(one);
+  lsSave(LS_CITY, list.slice(0, MAX_CITY));
+}
+
+/** 这一趟的"指纹"：**只有去哪、不去管几天**。
+    同一个行程（尼斯 → 巴黎）改了天数之后应该**覆盖**原来那条，而不是
+    在 6 个格子里再挤一条 —— 否则排两次就把整栏占满了，而它们其实是同一趟。
+    顺序算数（尼斯→巴黎 和 巴黎→尼斯 是两趟）。 */
+function tripKey(list) {
+  return list.map(s => s.city || s.label).join(' › ');
+}
+
+/** 排成功之后记一笔。同一趟只留最近一次（顺序=最近用的在前）。
+ *  ⚠️ `start` 必须**传进来**：它是 `runOnce` 里的局部变量，不是模块级全局 ——
+ *  直接引用会 ReferenceError（真踩了，`checkform` 抓到的）。 */
+function rememberTrip(res, start) {
+  if (mode !== 'trip' || !segs.length) return;
+  const days = (res && res.days) || [];
+  const one = {
+    key: tripKey(segs),
+    segs: segs.map(s => ({
+      label: s.label, city: s.city, lat: s.lat, lon: s.lon,
+      days: Math.max(1, Number(s.days) || 1),
+    })),
+    /* ↓ 这一趟**实际带的那几件**（打包清单）＋ 逐天温度。
+       今日页的「旅行模式」直接拿它当"这几天在身边的衣服"，不再重排一遍 ——
+       重排要重新查天气，而旅程一旦过了预报期就取不到温度，那时这个功能反而废掉。
+       存清单则永远可用（衣服是带出去的那几件，这个事实不随天气变）。 */
+    label: segs.map(s => s.city || s.label).join(' › '),
+    start, n_days: days.length,
+    items: ((res && res.packing) || []).map(x => x.id),
+    temps: days.map(d => ({ date: d.date, temp: d.temp })),
+  };
+  lsSave(LS_TRIP, [one, ...lsList(LS_TRIP).filter(x => x.key !== one.key)].slice(0, MAX_TRIP));
+}
+
+function shortName(label) { return esc(String(label || '').split(' · ')[0]); }
+
+function renderHist() {
+  const card = $('#histCard');
+  if (!card) return;
+  card.style.display = (mode === 'trip') ? '' : 'none';
+  if (mode !== 'trip') return;
+
+  const cities = lsList(LS_CITY);
+  $('#cityQuick').innerHTML = '<div class="histlb">搜过的城市</div>' + (cities.length
+    ? '<div class="histchips">' + cities.map((c, i) =>
+        `<button type="button" class="histchip" data-qcity="${i}">${shortName(c.label)}</button>`
+      ).join('') + '</div>'
+    : '<div class="histnone">搜过一次之后，这里会出现按钮，下次点一下就行。</div>');
+
+  const trips = lsList(LS_TRIP);
+  $('#tripSaved').innerHTML = '<div class="histlb">存过的行程</div>' + (trips.length
+    ? trips.map((t, i) => {
+        const rows = t.segs || [];
+        const n = rows.reduce((a, s) => a + Math.max(1, Number(s.days) || 1), 0);
+        const names = rows.map(s => shortName(s.label)).join(' → ');
+        return `<div class="triprow">
+          <button type="button" class="tripgo" data-trip="${i}">
+            <span class="tnm">${names}</span>
+            <span class="tnd">${n} 天</span>
+            <span class="tsub">按今天的天气重排</span>
+          </button>
+          <button type="button" class="tripdel" data-tripdel="${i}"
+                  aria-label="删掉这趟">×</button>
+        </div>`;
+      }).join('')
+    : '<div class="histnone">排过一次带目的地的行程之后，这里会出现「点一下重来」的入口。</div>');
+}
+let data = null;
+let busy = false;
+let mustIds = new Set(); // 「必带」的件 id（只旅行模式用）
+let closetItems = null;  // 衣橱里的件，懒加载一次
+
+/* 温度从哪来。
+   'weather' = 查到的预报；'manual' = 远期查不到、或用户自己指定 */
+let tempSource = 'weather';
+let picker = null;        // [{date, temp}] —— 用户逐天给的温度
+let pickerSeed = null;    // 触发选择器时的上下文（用来显示原因 / 预填）
+let homeTemp = null;      // 常住城市今天的温度，用作预填默认值
+
+/* ── 日期小工具 ── */
+function iso(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    + '-' + String(d.getDate()).padStart(2, '0');
+}
+function todayISO() { return iso(new Date()); }
+function addDays(s, n) {
+  const d = new Date(s + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  return iso(d);
+}
+function rangeText(start, n) {
+  if (!start || !n) return '';
+  return start.slice(5) + ' → ' + addDays(start, n - 1).slice(5);
+}
+
+/* ── 场合：**每个模式各记一份** ──
+   两个模式的默认值本来就不该一样：
+     · 在家（一周）：跟着「今日」页选的那个 —— 你在家穿什么，排一周就用什么。
+     · 出门（旅行）：默认「休闲」。出门穿得随意些，这是绝大多数情况。
+   各记一份还解决了一个坑：用户把旅行场合手动改成「通勤」（出差），
+   切回一周再切回来时，那趟的「通勤」不会被冲掉。 */
+let occByMode = { week: '通勤', trip: '休闲' };
+const OCC_FALLBACK = '通勤';
+
+/* 从「今日」页继承场合（localStorage 的 capsule.env）。
+   ⚠️ 只继承**场合**、不继承温度：这页的温度是"未来几天各自的"，
+   跟今日页那个"当下"温度不是一回事，照搬会把逐天预报顶掉。
+   ⚠️ 今日页明确选过才继承（包括明确选「不限」）—— 没记录时用本页原默认。 */
+function inheritedOcc() {
+  try {
+    const v = JSON.parse(localStorage.getItem('capsule.env') || '{}');
+    if (typeof v.occ === 'string') return v.occ;
+  } catch (e) {}
+  return OCC_FALLBACK;
+}
+
+function applyOcc() {
+  const v = occByMode[mode];
+  $('#occ').innerHTML = '<option value="">不限</option>' + option(meta.occasions, v);
+  $('#occ').value = v;
+}
+
+async function boot() {
+  meta = await loadMeta();
+  $('#start').value = todayISO();
+  $('#ndays').innerHTML = [3, 5, 7, 10, 14]
+    .map(n => `<option value="${n}"${n === 7 ? ' selected' : ''}>${n} 天</option>`).join('');
+  occByMode.week = inheritedOcc();
+  applyOcc();
+
+  await loadHome();
+  await loadMust();
+  renderMode();
+  await run();
+}
+
+/* ── 必带 ──
+   用户勾中的衣服一定进箱子。排布会优先把它们穿进去；那个温度穿不上也照样
+   塞进箱子（标「备着」），而且**试删对它们免疫** —— 不会因为"只穿了一次"
+   就被"少带件"砍掉。 */
+
+async function loadMust() {
+  if (closetItems) { renderMust(); return; }
+  try { closetItems = await API.get('/api/items?stage=owned'); }
+  catch (e) { closetItems = []; }
+  renderMust();
+}
+
+function renderMust() {
+  const host = $('#mustPick');
+  if (!host) return;
+  const items = closetItems || [];
+  if (!items.length) {
+    host.innerHTML = '<div class="note">衣橱里还没有单品。</div>';
+    return;
+  }
+  const order = ['L1', 'L2', 'L3', 'L4I', 'L4', 'L5', 'ACC'];
+  const by = {};
+  items.forEach(it => { (by[it.slot] = by[it.slot] || []).push(it); });
+  host.innerHTML = order.filter(s => by[s]).map(s => `
+    <div style="margin-bottom:8px">
+      <div class="note" style="margin:0 0 4px">${esc((meta.slots || {})[s] || s)}</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        ${by[s].map(it => `<button type="button"
+          class="btn sm${mustIds.has(Number(it.id)) ? ' primary' : ''}"
+          data-must="${it.id}">${esc(it.name)}</button>`).join('')}
+      </div>
+    </div>`).join('');
+  $('#mustNow').textContent = mustIds.size
+    ? `已选 ${mustIds.size} 件 —— 排出来之后一定会出现在清单里。`
+    : '一件都没选。不选就是纯粹按"少带件"来。';
+}
+
+$('#mustPick').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-must]');
+  if (!b) return;
+  const id = Number(b.dataset.must);
+  if (mustIds.has(id)) mustIds.delete(id); else mustIds.add(id);
+  renderMust();
+  run();          // 立刻重排，让用户看见它真的进了清单
+});
+
+async function loadHome() {
+  try { homeCfg = await API.get('/api/weather/config'); }
+  catch (e) { homeCfg = { has_city: false, label: '' }; }
+  // 顺手拿一下今天多少度 —— 用户自己给温度时，用这个当预填默认值，
+  // 总比凭空一个 18℃ 靠谱。
+  try {
+    const wx = await API.get('/api/weather?days=1');
+    if (wx && wx.ok && wx.day) homeTemp = wx.day.temp;
+  } catch (e) { /* 拿不到就算了，选择器会退回 18℃ */ }
+}
+
+/* ── 模式 ── */
+
+function renderMode() {
+  $('#modeseg').querySelectorAll('button')
+    .forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+
+  // 「必带」只在旅行模式下出现 —— 用户要的就是"出门这几件一定要带上"
+  const mc = $('#mustCard');
+  if (mc) mc.style.display = (mode === 'trip') ? '' : 'none';
+
+  if (mode === 'week') {
+    $('#modehint').textContent =
+      '在家这一周：目标是每天不重样。温度取你所在城市的预报。';
+    $('#cityTitle').textContent = '你的城市';
+    $('#cityNote').textContent = '设一次就行。今日页也会用它自动填今天的温度。';
+    // ⚠️ 这里曾经用 `.wxrow .big` —— 30px 的衬线大字。
+    // 结果同一页里城市名以 30px 出现了**两次**（这里 + 结果区），
+    // 而且它是"表格里的一格"，不是页面标题。现在用 .citynow（14.5px）。
+    $('#cityNow').innerHTML = (homeCfg && homeCfg.has_city)
+      ? `<div class="citynow"><span class="k">当前</span>${esc(homeCfg.label)}</div>`
+      : '<div class="citynow none">还没设城市 —— 设一个，「今日」那一屏就会自己知道'
+        + '今天多少度，不用再拖滑杆。</div>';
+  } else {
+    // ⚠️ 这里是 `textContent`，**不能写 `**` 这种 markdown 星号** ——
+    // 它会被原样显示出来（只有走 richText 的 tips 才认星号）。
+    $('#modehint').textContent = segs.length >= 2
+      ? '出门这一趟：不止一个地方。每段各查各的天气 —— 但箱子只有一个，按整趟一起算。'
+      : '出门这一趟：目标是少带件。会查目的地的天气，再逐件试删 —— 能不带的就不带。';
+    $('#cityTitle').textContent = '去哪儿';
+    $('#cityNote').textContent =
+      '这里选的不会改掉你的常住城市（看一眼东京的天气，不该把上海改成东京）。';
+    renderSegs();
+  }
+
+  // ⚠️「排几天」只在**没有分段**时才是输入框。分段之后天数归各段自己管 ——
+  // 页面里绝不能同时出现两个都能改天数的地方（两个状态源必然打架，改一个另一个就过期）。
+  const nd = $('#ndaysBox');
+  if (nd) nd.style.display = (mode === 'trip' && segs.length) ? 'none' : '';
+  const dg = $('#daygrid');
+  if (dg) dg.classList.toggle('one', mode === 'trip' && segs.length > 0);
+
+  // 搜城市那一条的文案跟着"设目的地 / 再加一段"变 —— 否则用户不知道
+  // 再搜一次是**替换**还是**追加**（这正是分段功能最容易让人困惑的地方）。
+  const adding = mode === 'trip' && segs.length > 0;
+  const q = $('#cityQ'), go = $('#cityGo');
+  if (q) q.placeholder = adding ? '再加一段：搜城市，比如 大阪 / 奈良' : '搜城市，比如 上海 / 京都 / 大理';
+  if (go) go.textContent = adding ? '加一段' : '搜';
+
+  // 「常用」跟着模式显隐（旅行才有意义），放在最后 —— 它是只读渲染，
+  // 不参与上面那些"两个状态源不许打架"的判断。
+  renderHist();
+}
+
+/* 分段目的地：一趟行程可以待不止一个地方（京都 3 天 + 大阪 3 天）。
+   天数是**每一段自己的**，也是唯一的状态源 —— 所以分段之后「排几天」会收起来。
+
+   日期不落库：每段从哪天文到哪天是**算出来的**（从开始日逐段往后推），
+   后端拿到的也是算好的日期。这样"改一段的天数"能立刻重排整条时间轴。 */
+function renderSegs() {
+  const host = $('#cityNow');
+  if (!host) return;
+
+  if (!segs.length) {
+    host.innerHTML = '<div class="citynow none">没选就按你常住城市的天气排。'
+      + '要去外地的话，先在下面搜一个目的地 —— 要去两个地方，'
+      + '选完第一个之后再搜一次就能「加一段」。</div>';
+    return;
+  }
+
+  const start = $('#start').value || todayISO();
+  let cursor = start;
+  const rows = segs.map((s, i) => {
+    const n = Math.max(1, s.days);
+    const from = cursor;
+    const to = addDays(from, n - 1);
+    cursor = addDays(to, 1);
+    // 行里只放第一段地名（"京都 · 京都府 · 日本" → "京都"）+ 日期，全名进 title。
+    // 390px 一行要塞下"序号 / 地名 / 日期 / 天数 / 删除"，全名一定放不下。
+    const short = String(s.label || '').split(' · ')[0] || '未命名';
+    return `<div class="segrow">
+      <span class="segidx">${i + 1}</span>
+      <span class="segnm" title="${esc(s.label || '')}">${esc(short)}</span>
+      <span class="segdt">${from.slice(5)}–${to.slice(5)}</span>
+      <select class="segdays" data-segdays="${i}" aria-label="这一段几天">
+        ${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map(nn =>
+          `<option value="${nn}"${nn === n ? ' selected' : ''}>${nn} 天</option>`).join('')}
+      </select>
+      <button type="button" class="segdel" data-segdel="${i}">×</button>
+    </div>`;
+  }).join('');
+
+  const total = segs.reduce((a, s) => a + Math.max(1, s.days), 0);
+  host.innerHTML = rows
+    + `<div class="segtotal">共 ${total} 天 · ${start.slice(5)} → `
+    + `${addDays(start, total - 1).slice(5)}</div>`;
+}
+
+/* 分段行的交互：改天数 / 去掉一段。用无值选择器 + 读 dataset（项目惯例）。 */
+$('#cityNow').addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-segdays]');
+  if (!sel) return;
+  const i = Number(sel.dataset.segdays);
+  if (!segs[i]) return;
+  segs[i].days = Math.max(1, Number(sel.value) || 1);
+  renderSegs();
+  run();
+});
+
+$('#cityNow').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-segdel]');
+  if (!b) return;
+  const i = Number(b.dataset.segdel);
+  if (!segs[i]) return;
+  const name = String(segs[i].label || '').split(' · ')[0];
+  segs.splice(i, 1);
+  toast(segs.length ? `去掉了「${name}」` : `去掉了「${name}」，改按常住城市的天气排`);
+  renderMode();
+  run();
+});
+
+$('#modeseg').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-mode]');
+  if (!b || b.dataset.mode === mode) return;
+  mode = b.dataset.mode;
+  // 切到「一周」就把旅行那套目的地放掉（和原来放掉 dest 一个道理：
+  // 切走再切回来从干净的开始，不会拿一份你以为已经没了的目的地排出来）。
+  if (mode === 'week') segs = [];
+  $('#cityHits').innerHTML = '';
+  $('#cityQ').value = '';
+  renderMode();
+  // 场合跟着模式换（旅行默认休闲 / 一周跟着今日页）——必须在 run() 之前，
+  // 否则这一趟会拿上一个模式场合算出来的结果填满屏幕。
+  applyOcc();
+  run();
+});
+
+/* ── 城市搜索 ── */
+
+async function doSearch() {
+  const q = $('#cityQ').value.trim();
+  if (!q) return;
+  $('#cityHits').innerHTML = '搜索中 <span class="spin"></span>';
+  try { hits = (await citySearch(q)).hits || []; }
+  catch (e) { hits = []; }
+  $('#cityHits').innerHTML = cityHitsHtml(hits, mode === 'week'
+    ? '点一条，设成你的常住城市。'
+    : (segs.length ? '点一条，加成下一段行程。' : '点一条，作为这趟的目的地。'));
+}
+
+$('#cityGo').addEventListener('click', doSearch);
+$('#cityQ').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
+/** 把一个城市加成一段行程。
+    第一段的天数沿用「排几天」当前的值（免得"选完目的地天数悄悄变了"），
+    追加的段默认 3 天，用户自己在段上改。
+    ⚠️ 搜索结果和「常用」里的城市**走同一条路** —— 两个入口两种行为，
+    是这类功能最容易长出来的坑。 */
+async function addSeg(h) {
+  const first = segs.length === 0;
+  segs.push({
+    label: h.label, city: h.city, lat: h.lat, lon: h.lon,
+    days: first ? (Number($('#ndays').value) || 7) : 3,
+  });
+  rememberCity(h);
+  toast(first ? '目的地：' + h.label
+    : `加了第 ${segs.length} 段：${String(h.label).split(' · ')[0]}`);
+  $('#cityQ').value = '';
+  $('#cityHits').innerHTML = '';
+  renderMode();
+  await run();
+}
+
+$('#cityHits').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-city]');
+  if (!b) return;
+  const h = hits[Number(b.dataset.city)];
+  if (!h) return;
+
+  if (mode === 'week') {
+    try {
+      const r = await saveHomeCity(h);
+      homeCfg = { has_city: true, label: r.label, config: r.config };
+      rememberCity(h);
+      toast('城市已设为 ' + r.label);
+      renderHist();
+    } catch (err) { toast('保存失败：' + err.message); return; }
+  } else {
+    // 已经有一段了，再选一次就是**加一段**（不是替换）。
+    await addSeg(h);
+  }
+});
+
+/* ── 常用：城市点一下就加成一段，行程点一下就按今天的天气重排 ── */
+
+$('#cityQuick').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-qcity]');
+  if (!b) return;
+  const c = lsList(LS_CITY)[Number(b.dataset.qcity)];
+  if (!c) return;
+  await addSeg(c);
+});
+
+$('#tripSaved').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-tripdel]');
+  if (del) {
+    const list = lsList(LS_TRIP);
+    const i = Number(del.dataset.tripdel);
+    const gone = (list[i] && list[i].segs && list[i].segs[0]) || {};
+    lsSave(LS_TRIP, list.filter((_, k) => k !== i));
+    renderHist();
+    toast(`去掉了「${String(gone.label || '').split(' · ')[0]}」这趟`);
+    return;
+  }
+  const b = e.target.closest('[data-trip]');
+  if (!b) return;
+  const t = lsList(LS_TRIP)[Number(b.dataset.trip)];
+  const rows = (t && t.segs) || [];
+  if (!rows.length) return;
+  // 整趟**换掉**（不是"加一段"）：用户点的是"那次旅行"，意图就是回到那次。
+  segs = rows.map(s => ({
+    label: s.label, city: s.city, lat: s.lat, lon: s.lon,
+    days: Math.max(1, Number(s.days) || 1),
+  }));
+  $('#cityQ').value = '';
+  $('#cityHits').innerHTML = '';
+  renderMode();
+  await run();          // 天气**现查** —— 这就是用户要的"更新一下气温信息"
+  const n = segs.reduce((a, s) => a + Math.max(1, s.days), 0);
+  toast(`${segs.length} 段 · ${n} 天，用的是刚查到的天气`);
+});
+
+/* ── 排 ── */
+
+$('#run').addEventListener('click', () => run());
+$('#reroll').addEventListener('click', () => run(true));
+// 场合改了 → 记在**当前模式**名下（切走再切回来还是它），再重排。
+$('#occ').addEventListener('change', () => { occByMode[mode] = $('#occ').value; run(); });
+// 改出发日 → 每段的起止日期跟着平移（它们是从出发日推出来的，不是存下来的）
+$('#start').addEventListener('change', () => { renderSegs(); run(); });
+$('#ndays').addEventListener('change', () => run());
+$('#manual').addEventListener('click', () => openPicker(null));
+
+/* ⚠️ `busy` 不能"直接丢掉"新请求。
+   踩过：切到旅行模式那一刻上一轮还在排，用户马上勾一件「必带」——
+   `run()` 被 busy 挡掉、静默返回，页面上什么都不会变（**又一类"点了没反应"**）。
+   现在记一笔 `pending`，等这一轮跑完自动补一次。 */
+let pending = false;
+
+async function run(reroll) {
+  if (busy) { pending = true; return; }
+  busy = true;
+  try {
+    await runOnce(reroll);
+  } finally {
+    busy = false;
+    if (pending) { pending = false; run(); }
+  }
+}
+
+async function runOnce(reroll) {
+  $('#msg').innerHTML = '排算中 <span class="spin"></span>';
+  $('#result').innerHTML = '';
+  $('#sub').textContent = '';
+
+  const start = $('#start').value || todayISO();
+  const body = {
+    mode,
+    start,
+    n_days: Number($('#ndays').value) || 7,
+    occasion: $('#occ').value || null,
+    use_llm: true,
+    seed: reroll ? Math.floor(Math.random() * 1e9) : 0,
+  };
+  // 旅行且选了目的地 → 走**分段**那条路：每段各查各的天气，按日期首尾相接
+  // 拼成一条行程。日期在这里算好（后端不猜日期），天数之和就是整趟天数。
+  // 一段都没选时仍旧按常住城市的天气排 —— 行为与加分段之前逐字一致。
+  if (mode === 'trip' && segs.length) {
+    let cursor = start;
+    body.n_days = 0;
+    body.segments = segs.map(s => {
+      const n = Math.max(1, s.days);
+      const seg = {
+        label: s.label, city: s.city, lat: s.lat, lon: s.lon,
+        start: cursor, days: n,
+      };
+      cursor = addDays(cursor, n);
+      body.n_days += n;
+      return seg;
+    });
+  }
+  if (mode === 'trip' && mustIds.size) body.must_ids = [...mustIds];
+
+  let res;
+  try {
+    res = await API.post('/api/plan', body);
+  } catch (e) {
+    $('#msg').innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
+    $('#result').innerHTML = '';
+    return;
+  }
+  $('#msg').textContent = '';
+  // **排成功才记** —— 失败的那趟不该进「常用」，否则常用里全是打不开的坑。
+  rememberTrip(res, start);
+  renderHist();
+
+  // 远期没有预报 → 不猜，让用户给温度
+  if (res && !res.ok && res.need_temps) {
+    data = res;
+    openPicker(res);
+    return;
+  }
+  tempSource = 'weather';
+  data = res;
+  render();
+}
+
+/* ── 自己给温度 ──
+   旅行常常排在一个月后，那时候谁也没有预报。
+   程序不去编一个温度 —— 让人给一个"大概多少度"，排布本身照样是硬的。 */
+
+/* 这一天属于哪一段。分段行程的日期是**显式**给的（段与段之间可能有空档），
+   所以只能拿后端给的 [from, to] 区间去对，不能按"连续 N 天"推。 */
+function segOfDate(date, seed) {
+  for (const s of ((seed && seed.segments) || [])) {
+    if (s.from && s.to && date >= s.from && date <= s.to) return s.label || '';
+  }
+  return '';
+}
+
+function openPicker(seed) {
+  pickerSeed = seed || null;
+  const n = Number(seed && seed.n_days) || Number($('#ndays').value) || 7;
+  const start = (seed && seed.start) || $('#start').value || todayISO();
+
+  const known = {};
+  ((seed && seed.days) || []).forEach(x => {
+    if (x.date && x.temp != null) known[x.date] = x.temp;
+  });
+  const kv = Object.keys(known).sort();
+  const fallback = kv.length ? known[kv[kv.length - 1]]
+    : (homeTemp != null ? homeTemp : 18);
+
+  // ⚠️ 分段行程必须用后端给的**显式日期轴**（`day_axis`）：两段之间可能隔着
+  // 几十天（10/01 京都、11/20 大阪），按 addDays 一天天推会把第二段的日期
+  // 整个算错 —— 而用户填完温度提交上去时用的**正是这些日期**。
+  const axis = (seed && seed.day_axis && seed.day_axis.length)
+    ? seed.day_axis.slice()
+    : Array.from({ length: n }, (_, i) => addDays(start, i));
+
+  picker = axis.map(date => ({
+    date,
+    temp: known[date] != null ? known[date] : fallback,
+    // 这一天是"查到的"还是"预填的" —— 文案里要据此说"有几天先替你填好了"
+    known: known[date] != null,
+    seg: segOfDate(date, seed),
+  }));
+  renderPicker();
+}
+
+function renderPicker() {
+  const reason = pickerSeed && pickerSeed.reason;
+  $('#sub').textContent = `${picker.length} 天 · 等你给温度`;
+
+  // 哪些段落没预报 —— 分段行程里"有预报的那几天"是**填好的**，
+  // 用户只要补查不到的那几段（这句话不说清，他会以为全都要自己填）。
+  const miss = ((pickerSeed && pickerSeed.segments) || [])
+    .filter(s => s.got != null && s.got < s.days)
+    .map(s => String(s.label || '').split(' · ')[0]);
+  const knownDays = picker.filter(p => p.known).length;
+
+  let rows = '';
+  let last = null;
+  picker.forEach((p, i) => {
+    if (p.seg && p.seg !== last) {
+      rows += `<div class="pkseg">${esc(String(p.seg).split(' · ')[0])}</div>`;
+      last = p.seg;
+    }
+    rows += `
+      <div class="row" style="align-items:center;gap:10px;margin-bottom:7px;flex-wrap:nowrap">
+        <span class="dt" style="width:52px;flex:none">${esc(p.date.slice(5))}</span>
+        <input type="range" min="-8" max="36" step="1" value="${p.temp}"
+               data-i="${i}" style="flex:1">
+        <b style="width:46px;flex:none;text-align:right" data-tv="${i}">${p.temp}℃</b>
+      </div>`;
+  });
+
+  $('#result').innerHTML = `<div class="card">
+    <div class="verdict compare">
+      <div class="label">${miss.length ? esc(miss.join('、')) + ' 那几天还没有预报'
+                                      : '那几天还没有预报'}</div>
+      <div class="text">
+        ${reason ? esc(reason) + '<br>' : ''}
+        旅行计划本来就常排在一个月前 —— 那时候没有谁能查到当天的天气。
+        <b>你给个大概温度，行李清单照样排得出来</b>，而且排法一点没打折。
+        ${knownDays ? `<br>已经查到的那 ${knownDays} 天先替你填好了，你只要改不对的。` : ''}
+      </div>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      ${[-3, 3, 10, 15, 20, 26, 32].map(t =>
+        `<button class="btn sm" data-all="${t}">全按 ${t}℃</button>`).join('')}
+    </div>
+    ${rows}
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="pkgo">按这个排</button>
+      ${pickerSeed && pickerSeed.days && pickerSeed.days.length && !pickerSeed.day_axis
+        ? '<button class="btn" id="pkback">只用有预报的那几天</button>' : ''}
+    </div>
+  </div>`;
+}
+
+$('#result').addEventListener('input', (e) => {
+  const r = e.target.closest('[data-i]');
+  if (!r || !picker) return;
+  const i = Number(r.dataset.i);
+  picker[i].temp = Number(r.value);
+  const tv = document.querySelector(`[data-tv="${i}"]`);
+  if (tv) tv.textContent = picker[i].temp + '℃';
+});
+
+$('#result').addEventListener('click', async (e) => {
+  const all = e.target.closest('[data-all]');
+  if (all && picker) {
+    const t = Number(all.dataset.all);
+    picker.forEach(p => { p.temp = t; });
+    renderPicker();
+    return;
+  }
+  if (e.target.id === 'pkback' && pickerSeed && pickerSeed.days) {
+    // 只用能查到的那些天，仍然走「天气」这条路
+    busy = true;
+    $('#msg').innerHTML = '排算中 <span class="spin"></span>';
+    const body = {
+      mode,
+      occasion: $('#occ').value || null,
+      use_llm: true, seed: 0,
+      days: pickerSeed.days.map(x => ({ date: x.date, temp: x.temp })),
+    };
+    // 同 `#pkgo`：这条路也得自己带「必带」，否则选了等于没选。
+    if (mode === 'trip' && mustIds.size) body.must_ids = [...mustIds];
+    try { data = await API.post('/api/plan', body); }
+    catch (err) { busy = false; toast(err.message); return; }
+    busy = false;
+    $('#msg').textContent = '';
+    tempSource = 'weather';
+    render();
+    return;
+  }
+  if (e.target.id !== 'pkgo' || !picker) return;
+
+  busy = true;
+  $('#msg').innerHTML = '排算中 <span class="spin"></span>';
+  const body = {
+    mode,
+    occasion: $('#occ').value || null,
+    use_llm: true, seed: 0,
+    // 带上 `seg`：分段行程手填温度之后，每天仍然要知道自己属于哪一段
+    // （不带它就只能在结果里看见日期，看不见"这几天在京都"）。
+    days: picker.map(p => ({ date: p.date, temp: p.temp, seg: p.seg || null })),
+  };
+  // ⚠️ 手填温度这条路**必须自己带上「必带」**。
+  // 踩过：`must_ids` 原来只在 `runOnce()` 里设过一次，而远期行程
+  // （预报查不到 → 走这一支）是**旅行最常见的路径** —— 于是用户勾的必带
+  // 全部被静默丢掉，页面上没有任何提示（又一类"选了没反应"）。
+  if (mode === 'trip' && mustIds.size) body.must_ids = [...mustIds];
+  try { data = await API.post('/api/plan', body); }
+  catch (err) { busy = false; $('#msg').innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`; return; }
+  busy = false;
+  $('#msg').textContent = '';
+  tempSource = 'manual';
+  render();
+});
+
+/* ── 渲染 ── */
+
+function render() {
+  const el = $('#result');
+
+  if (!data || !data.ok) {
+    if (data && data.need_temps) { openPicker(data); return; }
+    el.innerHTML = `<div class="card">
+      <div class="verdict skip"><div class="label">排不出来</div>
+      <div class="text">${esc((data && data.reason) || '未知原因')}</div></div>
+      ${data && data.need_city
+        ? '<div class="note">在上面把城市设好，再点一次「排出来」。</div>' : ''}
+      ${data && data.diag ? diagHtml(data.diag) : ''}</div>`;
+    return;
+  }
+
+  $('#sub').textContent = `${data.n_days} 天 · 用到 ${data.n_items} 件`
+    + (data.n_looks ? ` · 上衣不重样 ${data.n_looks} 天` : '');
+  el.innerHTML = [
+    metaCard(),
+    `<div class="card"><h2>每天穿什么</h2>${data.days.map(dayHtml).join('')}</div>`,
+    packingCard(),
+    tipsCard(),
+  ].join('');
+}
+
+/* ── 分段行程的展示 ──
+   一趟行程去过哪几段，只说一次（在这张"依据"卡里），不在每天的小标题上重复。
+   三条路都要能拿到它：
+     · 正常排完的旅行   → data.weather_meta.segments
+     · 预报不全、等着填 → data.segments
+     · 手填温度排完的   → 后端只拿到 days，从每天的 seg 反推
+   ⚠️ 少了第三条，用户手填完温度之后那几段就会**无声消失**（页面上只剩日期）。 */
+function segMetaList() {
+  const d = data || {};
+  const m = (d.weather_meta && d.weather_meta.segments) || d.segments;
+  if (m && m.length) return m;
+  const out = [];
+  let last = null;
+  for (const day of (d.days || [])) {
+    if (!day.seg) continue;
+    if (day.seg !== last) { out.push({ label: day.seg, days: 0 }); last = day.seg; }
+    out[out.length - 1].days += 1;
+  }
+  return out;
+}
+
+function shortLabel(s) { return String(s || '').split(' · ')[0]; }
+
+/* 后端的提示文案里用 `**…**` 标重点。直接 esc 会把星号原样显示在页面上 ——
+   先转义、再把**成对的**星号换成 <b>。顺序不能反：反了就等于给自己开了
+   一个注入口子（用户数据里出现 <script> 就会被执行）。 */
+function richText(s) {
+  return esc(String(s == null ? '' : s)).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+}
+
+/* 这趟的日期范围。有真实日期就用日期（分段行程的日期轴不是"从某天起连续 N 天"），
+   没有才退回按出行日 + 天数推。 */
+function planRange() {
+  const ds = ((data && data.days) || []).filter(d => d.date);
+  if (ds.length) {
+    return `${ds[0].date.slice(5)} → ${ds[ds.length - 1].date.slice(5)}`;
+  }
+  return rangeText($('#start').value, (data && data.n_days) || 0);
+}
+
+function segChain(list) {
+  const m = list || segMetaList();
+  if (m.length < 2) return '';
+  const total = m.reduce((a, s) => a + (s.days || 0), 0);
+  return '<div class="segchain">'
+    + m.map(s => `<span class="segchip"><b>${esc(shortLabel(s.label))}</b>
+        <span class="n">${s.days || 0} 天</span></span>`).join('<span class="segplus">→</span>')
+    + `<span class="segtotal">共 ${total} 天</span></div>`;
+}
+
+function metaCard() {
+  const wm = data.weather_meta;
+  const chain = segChain(null);
+  const many = segMetaList().length > 1;
+  if (tempSource === 'manual' || !wm) {
+    return `<div class="card">
+      <h2>这份计划用的温度</h2>
+      <div class="wxrow">
+        <span>${esc(planRange())}</span>
+        <span class="tag warn">按你给的温度</span>
+      </div>
+      ${chain}
+      <div class="note">那几天还没有预报（预报只到 16 天内），这份计划是按你给的大概温度排的
+        —— 排布规则本身一点没打折。</div>
+    </div>`;
+  }
+  // ⚠️ 这里曾经把城市名以 30px 的衬线大字再显示一遍，而上面「你的城市」卡里已经有一次
+  // —— 同一页里城市名出现两次、都是最大字号，是"排版不好"里最刺眼的一处。
+  // 这张卡要说的是"依据是什么"（哪段日子、预报新不新），城市名让上面那张卡去说。
+  return `<div class="card">
+    <h2>这份计划用的天气</h2>
+    <div class="wxrow">
+      <span>${esc(planRange())}</span>
+      <span class="tag ${wm.cached ? '' : 'info'}">${wm.cached ? '用的缓存' : '刚取的预报'}</span>
+    </div>
+    ${chain}
+    ${wm.stale ? `<div class="note" style="color:var(--amber)">${esc(wm.reason || '')}</div>` : ''}
+    <div class="note">${many ? '每段各取当地的当天' : '温度取的是当天'}<b>平均</b>
+      （预报给的是最高/最低），早出晚归的人可以整体往下调一档。</div>
+  </div>`;
+}
+
+function dayHtml(d, i) {
+  // 原来这里同时显示「13℃」和「13~26℃」—— 两个数字看着像矛盾的。
+  // 现在：区间是事实，档位是"我按几度排的"，用标签区分开。
+  const rg = tempRangeText(d);
+  const head = `<div class="dh">
+      <span class="dw">${esc(d.weekday || ('第 ' + (i + 1) + ' 天'))}</span>
+      <span class="dt">${d.date ? esc(d.date.slice(5)) : ''}${d.text ? ' · ' + esc(d.text) : ''}</span>
+      <span class="dom">${rg ? `<span class="muted">${rg}</span> ` : ''}${
+        d.temp == null ? '' : `<span class="tag">按 ${d.temp}℃</span>`}</span>
+    </div>`;
+
+  // 分段行程：只在**每段的第一天**打一条段名，后面几天不重复
+  // （每天都挂一个地名，一周看下来全是噪音，反而看不出"哪天换了地方"）。
+  const parts = String(d.seg || '').split(' · ');
+  const prev = (i > 0 && data.days[i - 1]) ? data.days[i - 1].seg : null;
+  const segHead = (d.seg && d.seg !== prev)
+    ? `<div class="dayseg"><b>${esc(parts[0])}</b>${
+        parts.length > 1 ? `<span>${esc(parts.slice(1).join(' · '))}</span>` : ''}</div>`
+    : '';
+
+  if (!d.outfit) {
+    return `<div class="day">${segHead}${head}
+      <div class="dempty">这一天排不出搭配。
+        ${d.temp == null ? '' : `${d.temp}℃ 下衣橱里没有合法组合 —— 去看一眼衣橱体检，缺哪一层会写清楚。`}
+      </div></div>`;
+  }
+
+  const strip = `<div class="pstrip">${d.outfit.items.map(it => `
+    <div class="pitem">${thumbHtml(it)}<div class="n">${esc(it.name)}</div></div>`).join('')}</div>`;
+  const note = d.outfit.reason ? `<div class="dnote">${esc(d.outfit.reason)}</div>` : '';
+  return `<div class="day">${segHead}${head}${strip}${note}</div>`;
+}
+
+function packingCard() {
+  if (!data.packing || !data.packing.length) return '';
+  const trip = data.mode === 'trip';
+  const nMust = (data.must_ids || []).length;
+  const head = trip
+    ? `带 ${data.n_items} 件，覆盖 ${data.n_planned} 天`
+    : `${data.n_items} 件`;
+  return `<div class="card">
+    <h2>${trip ? '装进箱子' : '这一周会用到'} <span class="tag">${esc(head)}</span>${
+      nMust ? `<span class="tag">必带 ${nMust} 件</span>` : ''}</h2>
+    ${data.packing_groups.map(g => `
+      <h3>${esc(g.name)}（${g.items.length} 件）</h3>
+      ${g.items.map(it => `<div class="packrow">
+        ${it.img_display
+          ? `<img src="${esc(it.img_display)}" alt="">`
+          : `<div class="ph">${esc(slotName(it.slot))}</div>`}
+        <div class="pn">${colorDot(it.color_hex)}${esc(it.name)}${
+          (data.must_ids || []).includes(it.id) ? '<span class="tag">必带</span>' : ''}</div>
+        <div class="pw">${it.wear_count ? it.wear_count + ' 天' : '备着'}</div>
+      </div>`).join('')}`).join('')}
+    ${data.must_backup && data.must_backup.length
+      ? `<div class="note">标「备着」的是你勾的必带 —— 这几天的温度穿不上它，
+         但还是给你塞进箱子了（你要带的，就不替你省）。</div>` : ''}
+    ${data.dropped_count
+      ? `<div class="note">已经试删掉 ${data.dropped_count} 件 ——
+         一件件问过「不带它，这几天还排得出不重样的吗」，答得出才敢让你别带。</div>` : ''}
+  </div>`;
+}
+
+function tipsCard() {
+  const tips = data.tips || [];
+  const warns = data.warnings || [];
+  const sum = data.summary ? `<div class="reason">${esc(data.summary)}</div>` : '';
+  if (!tips.length && !warns.length && !sum) return '';
+  return `<div class="card">
+    <h2>这几点注意</h2>
+    ${sum}
+    ${warns.map(w => `<div class="note" style="color:var(--red)">${esc(w)}</div>`).join('')}
+    ${tips.map(t => `<div class="note" style="font-size:13px;color:var(--text2);
+      margin-top:8px;line-height:1.6">· ${richText(t)}</div>`).join('')}
+    <div class="note">
+      所有搭配都是硬规则从你衣橱里枚举出来的，${data.summary_used ? '模型只写了上面那段话，' : ''}
+      没有一件是它编出来的。
+    </div>
+  </div>`;
+}
+
+function diagHtml(d) {
+  if (!d || !d.layers) return '';
+  const rows = d.layers.map(l => {
+    const bad = l.required && !l.eligible;
+    return `<div class="partner">
+      <div class="nm">${esc(l.name)}${l.required ? '' : ' <span class="muted">可选</span>'}</div>
+      <div class="cnt"${bad ? ' style="color:var(--red)"' : ''}>${l.eligible} / ${l.pool} 件合格</div>
+    </div>`;
+  }).join('');
+  return `<div class="note">${esc(d.hint || '')}</div>${rows}`;
+}
+
+boot();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs('plan'));</script>
+</body>
+</html>

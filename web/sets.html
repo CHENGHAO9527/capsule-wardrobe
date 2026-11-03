@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>套装</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>套装</h1>
+  <span class="sub" id="sub"></span>
+</div>
+
+<div class="wrap">
+
+  <!-- 我搭的 -->
+  <div class="card">
+    <h2>我搭的 <span class="tag" id="cnt">0 套</span></h2>
+    <div id="list"></div>
+    <div class="note" id="listnote">
+      存下来之后，<b>今日页到了能穿的温度会自己端出来</b>，不用你翻。
+      能不能穿是现算的 —— 改了某件的温度或属性，这里立刻跟着变。
+    </div>
+  </div>
+
+  <!-- 搭一套 -->
+  <div class="card" id="builder">
+    <h2 id="bh">搭一套</h2>
+    <div class="note" style="margin-top:0">
+      内搭 + 下装 + 鞋就能出门；中间层和外层看天加。
+      <b>挑完会自动告诉你这套能穿到几度</b>，穿不了的存不下来。
+    </div>
+
+    <label>给这套起个名字</label>
+    <input id="name" maxlength="40" placeholder="不填就叫「通勤套装 3」">
+
+    <div class="grid2">
+      <div><label>场合</label><select id="occ"></select></div>
+      <div><label>备注（可选）</label><input id="note" maxlength="60" placeholder="比如：配那条棕色腰带"></div>
+    </div>
+
+    <h3>已挑 <span class="muted" id="seln">0 件</span></h3>
+    <div id="build"></div>
+
+    <div id="picker"></div>
+
+    <div class="row" style="margin-top:14px">
+      <button class="btn primary" id="save" disabled>存下来</button>
+      <button class="btn" id="reset">清空</button>
+      <button class="btn" id="cancelEdit" hidden>取消编辑</button>
+    </div>
+    <div class="note" id="msg"></div>
+  </div>
+
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let meta = null;
+let items = [];          // 衣橱里能穿的单品
+let sel = [];            // 已挑的 id，**保序**（先挑的上衣排前面）
+let editing = null;      // 正在改哪一套（null = 新建）
+let ev = null;           // 上一次判定结果
+let evTimer = null;
+let busy = false;
+
+const SLOT_ORDER = ['L1', 'L2', 'L3', 'L4I', 'L4', 'L5', 'ACC'];
+const slotRank = s => { const i = SLOT_ORDER.indexOf(s); return i < 0 ? 99 : i; };
+
+async function boot() {
+  meta = await loadMeta();
+  $('#occ').innerHTML = '<option value="">不限</option>' +
+    option(meta.occasions, '通勤');
+
+  await loadItems();
+  renderPicker();
+  renderBuild();          // 一进来就把"还没挑"的提示和按钮状态摆好，
+  bind();                 // 不靠 HTML 上那个 disabled 属性（它会在后续改动里悄悄漂掉）
+  await loadSets();
+}
+
+async function loadItems() {
+  const all = await API.get('/api/items?stage=owned');
+  // 统计口径是 stage='owned' AND status='in_wardrobe'（见项目铁律）。
+  // 在洗的、送洗的、收起来的都不该出现在"今天能穿什么"里。
+  items = (all || []).filter(it => it.status === 'in_wardrobe');
+  items.sort((a, b) => slotRank(a.slot) - slotRank(b.slot) || a.id - b.id);
+}
+
+/* ══════════ 挑单品 ══════════ */
+
+function renderPicker() {
+  if (!items.length) {
+    $('#picker').innerHTML =
+      `<div class="verdictbox idle">衣橱里还没有单品。<a href="/wardrobe">先去录几件</a>。</div>`;
+    return;
+  }
+  const groups = [];
+  for (const slot of SLOT_ORDER) {
+    const g = items.filter(it => it.slot === slot);
+    if (g.length) groups.push({ slot, items: g });
+  }
+  $('#picker').innerHTML = groups.map(g => `
+    <div class="pgroup">
+      <div class="pgh">${esc(slotName(g.slot))}（${g.items.length}）</div>
+      <div class="pgrid">
+        ${g.items.map(it => `
+          <button class="pchip${sel.includes(it.id) ? ' on' : ''}" data-pick="${it.id}">
+            ${it.img_display
+              ? `<img src="${esc(it.img_display)}" alt="">`
+              : `<div class="ph">${esc(slotName(it.slot))}</div>`}
+            <div class="n">${esc(it.name)}</div>
+          </button>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+function renderBuild() {
+  $('#seln').textContent = `${sel.length} 件`;
+  const chosen = sel.map(id => items.find(x => x.id === id)).filter(Boolean);
+  const strip = chosen.length ? `
+    <div class="strip">
+      ${chosen.map(it => `
+        <div class="si">
+          ${it.img_display
+            ? `<img src="${esc(it.img_display)}" alt="">`
+            : `<div class="ph">${esc(slotName(it.slot))}</div>`}
+          <div class="n">${esc(it.name)}</div>
+        </div>`).join('')}
+    </div>` : '';
+  $('#build').innerHTML = strip + `<div class="verdictbox idle" id="vb">${
+    sel.length ? '看看这样能穿到几度…' : '还没挑 —— 至少两件才算一套。'}</div>`;
+  // 按钮状态**每次都由这里算**，不要只在 paintVerdict 里设 ——
+  // 否则"一件没挑"时的禁用态只存在于 HTML 属性里，改代码时很容易漂掉。
+  $('#save').disabled = !(ev && ev.ok) || busy;
+  if (ev && sel.length) paintVerdict();
+}
+
+function paintVerdict() {
+  const vb = $('#vb');
+  if (!vb) return;
+  if (!ev) return;
+  if (ev.ok) {
+    vb.className = 'verdictbox good';
+    vb.innerHTML = `✓ 这套在 <b>${ev.temp_min}~${ev.temp_max}℃</b> 都能穿`
+      + `（${ev.count} 件，全部合法）。`;
+  } else {
+    vb.className = 'verdictbox bad';
+    vb.innerHTML = `✕ 现在还穿不了：${esc(ev.reason)}`;
+  }
+  const ok = !!(ev && ev.ok);
+  $('#save').disabled = !ok || busy;
+}
+
+/* 判定是后台算的（要跑引擎枚举），打字/连点时不要每个都发一遍 */
+function evaluateSoon() {
+  ev = null;
+  $('#save').disabled = true;
+  const vb = $('#vb');
+  if (vb) {
+    vb.className = 'verdictbox idle';
+    vb.innerHTML = sel.length < 2 ? '还没挑 —— 至少两件才算一套。'
+      : '看看这样能穿到几度… <span class="spin"></span>';
+  }
+  clearTimeout(evTimer);
+  if (sel.length < 2) { paintVerdict(); return; }
+  evTimer = setTimeout(evaluate, 220);
+}
+
+async function evaluate() {
+  const ids = sel.slice();
+  let res;
+  try {
+    res = await API.post('/api/sets/evaluate',
+      { item_ids: ids, occasion: $('#occ').value || null });
+  } catch (e) {
+    const vb = $('#vb');
+    if (vb) { vb.className = 'verdictbox bad'; vb.textContent = '判定失败：' + e.message; }
+    return;
+  }
+  // 结果回来时用户可能又改过了 —— 只认最后一次
+  if (ids.join(',') !== sel.join(',')) return;
+  ev = res;
+  const vb = $('#vb');
+  if (vb) paintVerdict();
+  else renderBuild();
+}
+
+function bind() {
+  $('#picker').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick]');
+    if (!b) return;
+    const id = Number(b.dataset.pick);
+    const at = sel.indexOf(id);
+    if (at >= 0) sel.splice(at, 1);
+    else sel.push(id);
+    b.classList.toggle('on', at < 0);
+    // 同一个槽位只留一件 —— 但**不在这里拦**：让后端给一句人话
+    // （"同一个槽位只能放一件（内搭重复了）"比一个点不动的按钮好懂）。
+    renderBuild();
+    evaluateSoon();
+  });
+
+  $('#occ').addEventListener('change', () => { if (sel.length >= 2) evaluateSoon(); });
+  $('#reset').addEventListener('click', resetBuilder);
+  $('#cancelEdit').addEventListener('click', resetBuilder);
+  $('#save').addEventListener('click', save);
+  $('#list').addEventListener('click', onListClick);
+}
+
+function resetBuilder() {
+  sel = [];
+  editing = null;
+  ev = null;
+  $('#name').value = '';
+  $('#note').value = '';
+  $('#bh').textContent = '搭一套';
+  $('#save').textContent = '存下来';
+  $('#cancelEdit').hidden = true;
+  $('#msg').textContent = '';
+  renderPicker();
+  renderBuild();
+}
+
+/* ══════════ 存 / 删 / 改 ══════════ */
+
+async function save() {
+  if (!ev || !ev.ok || busy) return;
+  busy = true;
+  $('#save').disabled = true;
+  $('#msg').textContent = '存着…';
+  const body = {
+    name: $('#name').value.trim(),
+    item_ids: sel.slice(),
+    occasion: $('#occ').value || null,
+    note: $('#note').value.trim() || null,
+  };
+  try {
+    if (editing) await API.patch('/api/sets/' + editing, body);
+    else await API.post('/api/sets', body);
+  } catch (e) {
+    $('#msg').innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
+    busy = false;
+    paintVerdict();
+    return;
+  }
+  busy = false;
+  const wasEdit = !!editing;
+  resetBuilder();
+  await loadSets();
+  toast(wasEdit ? '改好了' : '存好了 —— 今日页到了能穿的温度就会端出来');
+}
+
+async function onListClick(e) {
+  const del = e.target.closest('[data-del]');
+  if (del) {
+    // 两步内联确认。**不用 window.confirm** —— 内嵌预览窗口里模态框会被静默拦掉，
+    // 表现成"点了没反应"（这个坑踩过）。
+    if (!del.classList.contains('armed')) {
+      del.classList.add('armed');
+      // 「确认」两字，**和「删除」一样宽** —— 按钮旁边就是「改」，
+      // 文案一长按钮撑宽，两个按钮当场换行（同一类毛病，录入页先踩的）。
+      del.dataset.label = del.textContent.trim();
+      del.textContent = '确认';
+      setTimeout(() => {
+        del.classList.remove('armed');
+        del.textContent = del.dataset.label || '删除';
+      }, 4000);
+      return;
+    }
+    try {
+      await API.del('/api/sets/' + del.dataset.del);
+    } catch (err) {
+      toast('删除失败：' + err.message);
+      return;
+    }
+    toast('删了');
+    await loadSets();
+    return;
+  }
+  const ed = e.target.closest('[data-edit]');
+  if (ed) {
+    const s = (window.__sets || []).find(x => String(x.id) === ed.dataset.edit);
+    if (!s) return;
+    editing = s.id;
+    sel = s.items.map(it => it.id);
+    $('#name').value = s.name || '';
+    $('#note').value = s.note || '';
+    $('#occ').value = s.occasion || '';
+    $('#bh').textContent = '改「' + (s.name || '') + '」';
+    $('#save').textContent = '保存修改';
+    $('#cancelEdit').hidden = false;
+    $('#builder').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    renderPicker();
+    renderBuild();
+    evaluateSoon();
+  }
+}
+
+async function loadSets() {
+  let res;
+  try {
+    res = await API.get('/api/sets');
+  } catch (e) {
+    $('#list').innerHTML = `<div class="verdictbox bad">读不出来：${esc(e.message)}</div>`;
+    return;
+  }
+  window.__sets = res.sets || [];
+  $('#cnt').textContent = `${res.count || 0} 套`;
+  if (!window.__sets.length) {
+    $('#list').innerHTML =
+      '<div class="verdictbox idle">还没有。在下面挑几件，给它起个名。</div>';
+    return;
+  }
+  $('#list').innerHTML = window.__sets.map(s => {
+    const bad = !s.eval.ok;
+    return `<div class="setcard${bad ? ' off' : ''}">
+      <div class="sh">
+        <span class="sn">${esc(s.name)}</span>
+        ${bad
+          ? '<span class="tag bad">穿不了</span>'
+          : `<span class="tag ok">${s.eval.temp_min}~${s.eval.temp_max}℃ 能穿</span>`}
+        ${s.occasion ? `<span class="tag">${esc(s.occasion)}</span>` : ''}
+        <span class="smeta">${s.n_items} 件${s.use_count ? ` · 穿过 ${s.use_count} 次` : ''}</span>
+      </div>
+      <div class="srow">
+        <div class="strip">
+          ${s.items.map(it => `
+            <div class="si">
+              ${it.img_display
+                ? `<img src="${esc(it.img_display)}" alt="">`
+                : `<div class="ph">${esc(slotName(it.slot))}</div>`}
+              <div class="n">${esc(it.name)}</div>
+            </div>`).join('')}
+        </div>
+      </div>
+      ${bad ? `<div class="verdictbox bad" style="margin-top:8px">${esc(s.eval.reason)}</div>` : ''}
+      ${s.note ? `<div class="note">${esc(s.note)}</div>` : ''}
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" data-edit="${s.id}">改</button>
+        <button class="btn sm danger" data-del="${s.id}">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+boot();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs('sets'));</script>
+</body>
+</html>

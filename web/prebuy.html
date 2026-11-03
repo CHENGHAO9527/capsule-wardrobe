@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>新衣试穿间</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>新衣试穿间</h1>
+  <span class="sub" id="sub"></span>
+</div>
+
+<div class="wrap">
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0">候选件</h2>
+      <button class="btn sm primary" id="newBtn">+ 录一件想买的</button>
+    </div>
+    <!-- 点「录一件想买的」直接弹相册/相机，不再先弹一张空表单 -->
+    <input type="file" id="candFile" accept="image/*" hidden>
+    <div id="cands" style="margin-top:10px"></div>
+    <div class="note">
+      候选件是影子单品 —— 放在衣橱外面做模拟，不进效率、不进 CPW、不进推荐。买下之后才转正。
+      没有照片？<a href="#" id="manualLink">手动填一件</a>。
+    </div>
+  </div>
+
+  <div id="form"></div>
+  <div id="result"></div>
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let meta = null;
+let vcfg = null;
+let draft = null;
+let currentId = null;
+
+const SLOT_ORDER = ['L1', 'L2', 'L3', 'L4I', 'L4', 'L5', 'ACC'];
+
+async function boot() {
+  meta = await loadMeta();
+  await loadVisionConfig();
+  $('#newBtn').addEventListener('click', () => $('#candFile').click());
+  $('#manualLink').addEventListener('click', e => { e.preventDefault(); openBlank(); });
+  $('#candFile').addEventListener('change', onFile);
+  await loadCandidates();
+}
+
+/* ══════════════ 录一件新的 ══════════════
+
+   这一屏从「先弹一张 16 个字段的空表单」改成了和录入页同一个形状：
+   **先给照片，剩下的让模型填。** 原来用户想买一条裤子，得手填槽位/品类/主色/中性色/
+   正式度/厚度/温度区间/衣长/版型/领型/袖型……而这些字段模型看图全能给出来，
+   手填一遍不只是慢，还必然填歪（正式度和厚度是主观值，肉眼估的和真实穿感差很远）。
+   现在：点一下就选照片 → 自动识别 → 只剩"价格"和"买它的理由"要你填，
+   其余全部收进「改字段」里，想纠错才打开。 */
+
+async function loadVisionConfig() {
+  try { vcfg = await API.get('/api/vision/config'); } catch (e) { vcfg = null; }
+}
+
+function blank() {
+  return {
+    _busy: false, _open: false, _picked: false, _source: 'local', _note: '',
+    // 用户**手动改过**的字段。识别结果回来的时候这些字段不许被模型盖掉 ——
+    // 模型要跑几秒，这几秒里用户多半已经在纠错了（详见 recognize() 那段注释）。
+    _touched: new Set(),
+    uid: '', img_display: '', img_llm: '', img_raw: '',
+    name: '', slot: 'L4', category: '长裤',
+    color_main: '', color_hex: '', is_neutral: 0,
+    formality: 3, thickness: 3, temp_min: 5, temp_max: 30,
+    collar: '', sleeve: '', length_band: '长', fit: '合身',
+    material: '', pattern: '纯色',
+    purchase_price: '', source_url: '', intent: '', eval_batch_id: '', notes: '',
+  };
+}
+
+/* 完全没有照片时的逃生口 —— 罕见，但不能没有（有些店只有文字商品页） */
+function openBlank() {
+  draft = blank();
+  draft._picked = true;        // 没照片就没有识别，槽位默认给 L4，用户自己改
+  draft._note = '没照片，字段按品类默认值填了，重要的话展开「改字段」核对一下';
+  renderForm();
+}
+
+async function onFile(e) {
+  const f = (e.target.files || [])[0];
+  e.target.value = '';
+  if (!f) return;
+
+  draft = blank();
+  draft._busy = true;
+  renderForm();
+
+  try {
+    const fd = new FormData();
+    fd.append('file', f);
+    const res = await fetch('/api/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '上传失败');
+
+    draft.uid = data.uid;
+    draft.img_display = data.img_display;
+    draft.img_llm = data.img_llm;
+    draft.img_raw = data.img_raw;
+    // 颜色一律用本地实测值（见 docs/00：颜色不交给模型）
+    draft.color_main = data.color.name || '';
+    draft.color_hex = data.color.hex || '';
+    draft.is_neutral = data.color.neutral || 0;
+    if (data.color.framed) {
+      draft._note = '这看着是手机截图，不是原图 —— 颜色多半测反了，建议传原图';
+    }
+    // 裁剪后仍没找到衣服（整屏都是价格/标题文字）要当场说，别让它变成一个没图的空壳
+    if (data.color && data.color.garment_ok === false) {
+      draft._note = '这张图里没认出衣服（看着是一整屏商品文字）—— 换一张商品图更好';
+    }
+    draft._busy = false;
+    renderForm();
+    applyDefaults();
+    await recognize();
+  } catch (err) {
+    draft._busy = false;
+    draft._note = err.message;
+    renderForm();
+    toast(err.message);
+  }
+}
+
+/* 按品类把默认值补齐（模型没开时的兜底） */
+function applyDefaults() {
+  if (!draft) return;
+  const d = (meta.category_defaults || {})[draft.category] || {};
+  for (const k in d) draft[k] = d[k];
+  if (['L4I', 'L4', 'L5', 'ACC'].includes(draft.slot)) { draft.collar = ''; draft.sleeve = ''; }
+  if (['L5', 'ACC'].includes(draft.slot)) draft.length_band = '';
+}
+
+async function recognize() {
+  if (!draft || !draft.uid) return;
+  if (!vcfg || !vcfg.enabled) {
+    draft._busy = false;
+    draft._note = '还没接视觉模型 —— 现在只能手点槽位。接上它上传就自动填好。<a href="/settings">去接模型</a>';
+    renderForm();
+    return;
+  }
+  draft._busy = true;
+  draft._note = '';
+  renderForm();
+
+  let res;
+  try {
+    res = await API.post('/api/vision/analyze', { items: [{ key: 'c', uid: draft.uid }] });
+  } catch (err) {
+    draft._busy = false;
+    draft._note = '识别失败（' + err.message + '），已退回按品类默认值';
+    renderForm();
+    return;
+  }
+  draft._busy = false;
+
+  const r = res.results && res.results.c;
+  if (!res.enabled || !r) {
+    draft._note = '识别失败（' + ((res.errors && res.errors.c) || res.reason || '未知') + '），已退回默认值';
+    renderForm();
+    return;
+  }
+
+  // 只吃语义字段。颜色保留本地测出来的 —— 模型色值随打光变化、不可复现，
+  // 而颜色决定撞色和中性色判定，错一个值污染之后所有搭配判断。
+  const keep = { color_main: draft.color_main, color_hex: draft.color_hex,
+                 is_neutral: draft.is_neutral, uid: draft.uid,
+                 img_display: draft.img_display, img_llm: draft.img_llm, img_raw: draft.img_raw };
+  /* ⚠️ **用户已经手选过的字段必须一起保住。**
+     模型要跑好几秒（手机上更久），这几秒里用户自然会先动手改 —— 而识别结果
+     一落定就 `Object.assign` 把整片盖回模型值，界面上就是
+     "选了之后又跳回默认选项"（用户报过，F3 节打桩复现了：领型/材质/图案/厚度全被冲掉）。
+     没碰过的字段照旧采纳模型给的 —— 修成"识别整个失效"是另一头的错。 */
+  for (const k of (draft._touched || [])) if (k in draft) keep[k] = draft[k];
+  const note = draft._note;
+  Object.assign(draft, r, keep);
+  draft._source = 'model';
+  draft._picked = true;
+  draft._note = note;
+  if (r._dropped && r._dropped.length) {
+    draft._note = '模型给的 ' + r._dropped.join('/') + ' 不合法，已按品类默认值补上';
+  }
+  renderForm();
+}
+
+/* ══════════════ 候选件列表 ══════════════ */
+
+async function loadCandidates() {
+  const rows = (await API.get('/api/items?stage=candidate'))
+    .filter(r => !r.decision || r.decision === null);
+  $('#sub').textContent = rows.length ? `${rows.length} 件待决策` : '';
+  if (!rows.length) {
+    $('#cands').innerHTML = '<div class="empty" style="padding:18px">还没有候选件。<br><span class="muted">点右上角录一件想买的衣服。</span></div>';
+    return;
+  }
+  $('#cands').innerHTML = rows.map(r => `
+    <div class="partner">
+      ${r.img_display ? `<img class="img" src="${esc(r.img_display)}" alt="">` : `<div class="ph">${esc(slotName(r.slot))}</div>`}
+      <div class="nm">${colorDot(r.color_hex)}${esc(r.name)}
+        <div class="muted" style="font-size:12px">${esc(slotName(r.slot))} · ${esc(r.category || '')}${r.purchase_price ? ' · ¥' + r.purchase_price : ''}</div>
+      </div>
+      <button class="btn sm primary" data-eval="${r.id}">模拟</button>
+      <button class="btn sm" data-del="${r.id}">删</button>
+    </div>`).join('');
+}
+
+$('#cands').addEventListener('click', async e => {
+  const ev = e.target.dataset.eval, dl = e.target.dataset.del;
+  if (ev) return runEval(Number(ev));
+  if (dl) {
+    if (!confirm('删除这个候选件？')) return;
+    await API.del('/api/items/' + dl);
+    await loadCandidates();
+    $('#result').innerHTML = '';
+  }
+});
+
+/* ══════════════ 一张卡 ══════════════ */
+
+function badge() {
+  if (draft._busy) return '<span class="tag info">识别中</span>';
+  if (draft._source === 'model') return '<span class="tag ok">自动识别</span>';
+  if (!draft._picked) return '<span class="tag bad">选一下槽位</span>';
+  return '<span class="tag warn">手填</span>';
+}
+
+function renderForm() {
+  if (!draft) { $('#form').innerHTML = ''; return; }
+  const cats = meta.categories[draft.slot] || [];
+  if (!cats.includes(draft.category)) draft.category = cats[0] || '';
+
+  const needSlot = !draft._picked;
+
+  $('#form').innerHTML = `
+  <div class="card">
+    <h2>这件想买的 <span class="muted" style="font-weight:400;font-size:12px">填完就模拟它能给你多出几套</span></h2>
+    <div class="gcard${needSlot ? ' need' : ''}">
+      <div class="gc-top">
+        ${draft.img_display ? `<img class="gc-thumb" src="${esc(draft.img_display)}" alt="">`
+                            : `<div class="gc-thumb ph">无图</div>`}
+        <div class="gc-side">
+          ${badge()}
+          <div class="gc-color">${draft.color_hex ? `<span class="dot" style="background:${esc(draft.color_hex)}"></span>` : ''}${esc(draft.color_main || '颜色未知')}${draft.is_neutral ? ' <span class="muted">中性</span>' : ''}</div>
+          ${draft._note ? `<div class="gc-warn">${draft._note}</div>` : ''}
+        </div>
+      </div>
+
+      <input class="gc-name" data-d="name" value="${esc(draft.name)}" placeholder="起个名，比如 卡其色直筒裤">
+
+      ${needSlot ? `<div class="gc-slots">
+        ${SLOT_ORDER.map(s => `<button type="button" data-slot="${s}"${draft.slot === s ? ' class="on"' : ''}>${esc(meta.slots[s])}</button>`).join('')}
+      </div>` : ''}
+      ${(needSlot || draft._open) ? `<select data-d="category">${option(cats, draft.category)}</select>` : ''}
+
+      <div class="gc-meta">${esc(slotName(draft.slot))} · ${esc(draft.category || '')} · 正式 ${draft.formality} · 厚度 ${thickWord(draft.thickness)} · ${draft.temp_min}~${draft.temp_max}℃${draft.collar ? ' · ' + esc(draft.collar) : ''}${draft.material ? ' · ' + esc(draft.material) : ''}</div>
+
+      <!-- 厚度**必须常驻可见**：它是这张卡上最影响结论、又最容易被模型估错的一个字段。
+           藏进「改字段」里的话，用户看到「建议不买」根本想不到是自己改一下就能翻盘的
+           （实测：一件厚外套被估成「中等」→ 搭不上现有衣服 → 直接判不买，而用户找不到地方改）。 -->
+      ${thickPicker('d', draft.thickness)}
+      <div class="note" style="margin-top:-4px">
+        模型看图的估值 —— 觉得不像就点一下，它会立刻改变这件能和谁搭。
+      </div>
+
+      <div class="grid2">
+        <div><label>价格（决定 CPW）</label><input type="number" data-d="purchase_price" value="${draft.purchase_price ?? ''}" placeholder="元"></div>
+        <div><label>想买它的理由</label><input data-d="intent" value="${esc(draft.intent)}" placeholder="缺一条通勤裤"></div>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="saveCand">保存并模拟</button>
+        <button class="btn sm" data-act="more">${draft._open ? '收起' : '改字段'}</button>
+        ${draft.uid ? `<button class="btn sm" data-act="retry">重识别</button>` : ''}
+        <button class="btn sm" data-act="cancel">取消</button>
+      </div>
+
+      ${draft._open ? `
+      <div class="gc-extra">
+        <div class="grid2">
+          <div><label>正式度 <b>${draft.formality}</b></label><input type="range" data-d="formality" min="1" max="5" value="${draft.formality}"></div>
+          <div><label>温度区间</label><input type="number" data-d="temp_min" value="${draft.temp_min ?? ''}" style="margin-bottom:4px"><input type="number" data-d="temp_max" value="${draft.temp_max ?? ''}"></div>
+        </div>
+        <div class="grid2">
+          <div><label>槽位</label><select data-d="slot">${option(Object.entries(meta.slots).map(([v, l]) => ({ value: v, label: l })), draft.slot)}</select></div>
+          <div><label>主色</label><select data-d="color_main">${['<option value="">未选</option>'].concat(meta.colors.map(x => `<option value="${esc(x.name)}"${x.name === draft.color_main ? ' selected' : ''}>${esc(x.name)}</option>`)).join('')}</select></div>
+          <div><label>中性色</label><select data-d="is_neutral"><option value="1"${draft.is_neutral ? ' selected' : ''}>是</option><option value="0"${!draft.is_neutral ? ' selected' : ''}>否</option></select></div>
+          <div><label>衣长</label><select data-d="length_band">${['<option value="">不适用</option>'].concat(meta.lengths.map(v => `<option value="${v}"${v === draft.length_band ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>版型</label><select data-d="fit">${option(meta.fits, draft.fit)}</select></div>
+          <div><label>领型</label><select data-d="collar">${['<option value="">不适用</option>'].concat(meta.collars.map(v => `<option value="${v}"${v === draft.collar ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>袖型</label><select data-d="sleeve">${['<option value="">不适用</option>'].concat(meta.sleeves.map(v => `<option value="${v}"${v === draft.sleeve ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>材质</label><select data-d="material">${['<option value="">未选</option>'].concat(meta.materials.map(v => `<option value="${v}"${v === draft.material ? ' selected' : ''}>${v}</option>`)).join('')}</select></div>
+          <div><label>图案</label><select data-d="pattern">${option(meta.patterns, draft.pattern)}</select></div>
+        </div>
+        <label>商品链接（可选）</label><input data-d="source_url" value="${esc(draft.source_url)}" placeholder="https://">
+        <label>批次号（同批横向对比用）</label><input type="number" data-d="eval_batch_id" value="${draft.eval_batch_id ?? ''}" placeholder="留空=单独评估">
+        <label>备注</label><input data-d="notes" value="${esc(draft.notes)}" placeholder="版型偏大 / 只有这一个色">
+      </div>` : ''}
+    </div>
+    <div class="note">候选件通常只有商品图，主色可能偏色 —— 决定买之前用自然光拍一次实物核验。</div>
+  </div>`;
+}
+
+$('#form').addEventListener('input', e => {
+  const f = e.target.dataset.d;
+  if (!f || !draft) return;
+  let v = e.target.value;
+  if (['formality', 'thickness', 'temp_min', 'temp_max', 'is_neutral',
+       'purchase_price', 'eval_batch_id'].includes(f)) {
+    v = v === '' ? null : Number(v);
+  }
+  draft[f] = v;
+  // 记下来"这一项是用户自己改的" —— 识别结果落定时要跳过它，不许覆盖。
+  if (draft._touched && draft._touched.add) draft._touched.add(f);
+  if (f === 'name' || f === 'intent' || f === 'source_url' || f === 'notes') return;
+  if (f === 'slot') {
+    draft.category = (meta.categories[v] || [''])[0];
+    draft.collar = ['L1', 'L2', 'L3'].includes(v) ? '圆领' : '';
+    draft.sleeve = ['L1', 'L2', 'L3'].includes(v) ? '长袖' : '';
+    if (v === 'L3') { draft.thickness = 4; draft.temp_min = -5; draft.temp_max = 15; }
+    if (v === 'L4I' || v === 'L4') draft.length_band = '长';
+    draft._picked = true;
+    renderForm();
+    return;
+  }
+  if (f === 'category') { renderForm(); return; }
+  if (f === 'color_main') {
+    const c = meta.colors.find(x => x.name === v);
+    if (c) { draft.color_hex = c.hex; draft.is_neutral = c.neutral; }
+    renderForm();
+    return;
+  }
+  if (f === 'formality' || f === 'thickness') {
+    const lbl = e.target.parentElement.querySelector('label b');
+    // 厚度显示**词**不是数字（跟录入页同一套：词表在 api.js，只有一份）。
+    if (lbl) lbl.textContent = f === 'thickness' ? thickWord(v) : v;
+  }
+  const m = document.querySelector('.gc-meta');
+  if (m && f !== 'notes' && f !== 'purchase_price' && f !== 'eval_batch_id' && f !== 'source_url') {
+    m.textContent = `${slotName(draft.slot)} · ${draft.category || ''} · 正式 ${draft.formality} · 厚度 ${thickWord(draft.thickness)} · ${draft.temp_min}~${draft.temp_max}℃`
+      + (draft.collar ? ' · ' + draft.collar : '') + (draft.material ? ' · ' + draft.material : '');
+  }
+});
+
+$('#form').addEventListener('click', async e => {
+  const slotBtn = e.target.closest('[data-slot]');
+  if (slotBtn) {
+    draft.slot = slotBtn.dataset.slot;
+    draft.category = (meta.categories[draft.slot] || [''])[0];
+    draft._picked = true;
+    // 用户亲手点的槽位/品类也要记成"改过"：他是按自己看到的实物选的，
+    // 不该被几秒后落定的模型结果改掉。applyDefaults 补的那些默认值不记
+    // —— 那些是占位，模型给的更准。
+    if (draft._touched && draft._touched.add) { draft._touched.add('slot'); draft._touched.add('category'); }
+    applyDefaults();
+    renderForm();
+    return;
+  }
+  const act = e.target.closest('[data-act]');
+  if (act) {
+    const a = act.dataset.act;
+    if (a === 'more') { draft._open = !draft._open; renderForm(); }
+    if (a === 'retry') { recognize(); }
+    if (a === 'cancel') { draft = null; renderForm(); }
+    return;
+  }
+  if (e.target.id !== 'saveCand') return;
+
+  if (!draft._picked) { toast('先选一下槽位 —— 不然没法判断它能和谁搭'); return; }
+  const body = { ...draft, stage: 'candidate' };
+  delete body._busy; delete body._open; delete body._picked;
+  delete body._source; delete body._note; delete body._touched;
+  for (const k of ['purchase_price', 'eval_batch_id']) if (body[k] === '' || body[k] == null) body[k] = null;
+  if (body.temp_min == null) body.temp_min = 5;
+  if (body.temp_max == null) body.temp_max = 30;
+  for (const k of ['img_raw', 'img_display', 'img_llm']) if (!body[k]) body[k] = null;
+  if (!String(body.name || '').trim()) {
+    body.name = [body.color_main, body.category].filter(Boolean).join(' ') || '未命名';
+  }
+  try {
+    const saved = await API.post('/api/items', body);
+    draft = null; renderForm();
+    await loadCandidates();
+    await runEval(saved.id);
+  } catch (err) { toast(err.message); }
+});
+
+/* ══════════════ 模拟与结果 ══════════════ */
+
+async function runEval(id) {
+  currentId = id;
+  $('#result').innerHTML = `<div class="card"><div class="muted">正在枚举你衣橱里的所有合法搭配 <span class="spin"></span>　第一次跑会慢几秒</div></div>`;
+  try {
+    const r = await API.post('/api/prebuy/' + id, { save: true });
+    if (r.error) { $('#result').innerHTML = `<div class="card"><div class="verdict skip"><div class="text">${esc(r.error)}</div></div></div>`; return; }
+    renderResult(r);
+    await loadCandidates();
+  } catch (e) {
+    $('#result').innerHTML = `<div class="card"><div class="verdict skip"><div class="text">${esc(e.message)}</div></div></div>`;
+  }
+}
+
+const VERDICT_LABEL = { buy: '建议买', skip: '建议不买', compare: '需要横向对比' };
+
+function renderResult(r) {
+  const revs = new Set(r.revival_ids || []);
+  const maxCnt = Math.max(...(r.partners || []).map(p => p.count), 1);
+
+  const metrics = `
+    <div class="metrics">
+      <div class="metric"><div class="k">新增搭配</div><div class="v ${r.delta_n > 0 ? 'good' : 'bad'}">${r.delta_n > 0 ? '+' : ''}${r.delta_n}</div></div>
+      <div class="metric"><div class="k">覆盖季节</div><div class="v">${r.season_count}</div></div>
+      <div class="metric"><div class="k">替代率</div><div class="v ${r.replace_rate === 0 ? 'good' : 'warn'}">${r.replace_rate}</div></div>
+      <div class="metric"><div class="k">救活</div><div class="v ${r.revived_count > 0 ? 'good' : ''}">${r.revived_count}</div></div>
+      <div class="metric"><div class="k">净收益</div><div class="v ${r.net_gain > 0 ? 'good' : 'bad'}">${r.net_gain > 0 ? '+' : ''}${r.net_gain}</div></div>
+    </div>
+    <div class="note">覆盖：${seasonText(r.seasons)} · 搭档 ${r.partner_total} 件 · 模拟前 ${r.base_n} 套 → 模拟后 ${r.with_n} 套</div>`;
+
+  const hole = r.hole_flag ? `
+    <div class="card" style="background:var(--amber-bg);border-color:transparent">
+      <b>空洞效应已触发</b>
+      <div class="note" style="color:var(--text);margin-top:6px">
+        你衣橱里目前没有「${esc(slotName(r.candidate.slot))}」这一类单品。ΔN 里很大一部分来自这个空槽，不是这件衣服本身的功劳。
+        建议一次录 2–3 件同品类候选，用批次横向对比再决定。
+      </div>
+    </div>` : '';
+
+  /* 一件都搭不上时，最可能的原因不是"这件不好"，而是**它的字段被估偏了** ——
+     厚度尤其（它决定保暖值，进而决定能不能和现有外套/内搭配到一起）。
+     改一个词就能翻盘，所以直接把出口指出来，别让用户对着"建议不买"发愣。 */
+  const fixHint = (!r.partner_total) ? `
+    <div class="card" style="background:var(--amber-bg);border-color:transparent">
+      <b>一件都搭不上 —— 先核一下厚度</b>
+      <div class="note" style="color:var(--text);margin-top:6px">
+        上面那张卡里的「厚度」是模型看图的估值，估偏了就会得出这个结论。
+        点一下正确的词，再「保存并模拟」一次看看。
+      </div>
+    </div>` : '';
+
+  const partners = (r.partners || []).slice(0, 14).map(p => `
+    <div class="partner${revs.has(p.id) ? ' revive' : ''}">
+      <div class="nm">${esc(p.name)}
+        <div class="muted" style="font-size:12px">${esc(slotName(p.slot))} · ${esc(p.category || '')}</div>
+        <div class="bar${revs.has(p.id) ? ' revive' : ''}" style="width:140px"><i style="width:${(p.count / maxCnt * 100).toFixed(1)}%"></i></div>
+      </div>
+      <div class="cnt">+${p.count} 套</div>
+    </div>`).join('') || '<div class="muted">和现有单品一件都搭不上。</div>';
+
+  const revivals = (r.revivals || []).length ? `
+    <h3>被它救活的孤岛件</h3>
+    ${r.revivals.map(v => `<div class="partner revive">
+      <div class="nm">⚑ ${esc(v.name)} <div class="muted" style="font-size:12px">原本 ΔN = 0，一件都搭不上</div></div>
+    </div>`).join('')}` : '';
+
+  const conflicts = (r.conflicts || []).length ? `
+    <h3>搭不上的（${r.conflicts.length} 件）</h3>
+    ${r.conflicts.slice(0, 8).map(c => `<div class="partner">
+      <div class="nm" style="color:var(--text2)">${esc(c.name)}</div>
+      <div class="cnt" style="color:var(--text3);font-weight:400">${esc(c.reason)}</div>
+    </div>`).join('')}` : '';
+
+  const replace = r.replace_rate > 0 ? `
+    <h3>进一件出一件</h3>
+    <div class="note">和它功能重复的现有单品（${r.replace_rate} 件）：${r.replace_names.map(esc).join('、')}</div>
+    <div class="note">推荐优先淘汰 ΔN 最低的那件 —— 删了不损失搭配空间。</div>` : `
+    <h3>进一件出一件</h3>
+    <div class="tag ok">替代率 0 —— 它不顶掉任何现有单品，是纯增量</div>`;
+
+  $('#result').innerHTML = `
+    <div class="verdict ${r.verdict}">
+      <div class="label">${VERDICT_LABEL[r.verdict] || r.verdict}</div>
+      <div class="text">${esc(r.verdict_text)}</div>
+    </div>
+    <div class="card">
+      <h2>${esc(r.candidate.name)}</h2>
+      ${metrics}
+    </div>
+    ${hole}
+    ${fixHint}
+    <div class="card">
+      <h2>能和谁搭</h2>
+      ${partners}
+      ${revivals}
+      ${conflicts}
+    </div>
+    <div class="card">${replace}</div>
+    <div class="card">
+      <div class="row">
+        <button class="btn ok" data-do="buy">确认买下 → 转入在库</button>
+        <button class="btn" data-do="keep">先放着</button>
+        <button class="btn danger" data-do="reject">不买</button>
+      </div>
+    </div>
+    <div id="cmpBox"></div>`;
+
+  const batchId = r.candidate.id;
+  API.get('/api/items?stage=candidate').then(rows => {
+    const me = rows.find(x => x.id === batchId);
+    if (me && me.eval_batch_id) renderCompare(me.eval_batch_id, batchId);
+  });
+}
+
+async function renderCompare(batchId, meId) {
+  const box = $('#cmpBox');
+  if (!box) return;                       // 用户已经切换走了
+  try {
+    const data = await API.get('/api/prebuy/batch/' + batchId);
+    if (!data.candidates || data.candidates.length < 2) return;
+    if (!$('#cmpBox')) return;            // 异步返回时元素可能已不在
+    const rows = data.candidates;
+    box.innerHTML = `
+    <div class="card">
+      <h2>同批候选对比 · 批次 ${batchId}</h2>
+      <div style="overflow-x:auto">
+      <table class="cmp">
+        <tr><th></th>${rows.map(r => `<th${r.id === meId ? ' style="color:var(--accent)"' : ''}>${esc(r.name.slice(0, 8))}${r.id === meId ? ' ★' : ''}</th>`).join('')}</tr>
+        <tr><td>新增搭配</td>${rows.map(r => `<td>${r.delta_n > 0 ? '+' : ''}${r.delta_n}</td>`).join('')}</tr>
+        <tr><td>救活</td>${rows.map(r => `<td>${r.revived_count}</td>`).join('')}</tr>
+        <tr><td>替代率</td>${rows.map(r => `<td>${r.replace_rate}</td>`).join('')}</tr>
+        <tr><td>覆盖季节</td>${rows.map(r => `<td>${r.season_count}</td>`).join('')}</tr>
+        <tr><td>价格</td>${rows.map(r => `<td>${r.price ? '¥' + r.price : '—'}</td>`).join('')}</tr>
+      </table></div>
+      <div class="note">按新增搭配降序、替代率升序排。${rows.length ? '最优是「' + esc(rows[0].name) + '」。' : ''}</div>
+    </div>`;
+  } catch (e) { /* 忽略 */ }
+}
+
+$('#result').addEventListener('click', async e => {
+  const act = e.target.dataset.do;
+  if (!act || !currentId) return;
+  try {
+    if (act === 'buy') { await API.post('/api/items/' + currentId + '/promote'); toast('已转入在库 ✓'); }
+    if (act === 'reject') { await API.post('/api/items/' + currentId + '/reject'); toast('已标记不买'); }
+    if (act === 'keep') { toast('先放着，随时回来再看'); return; }
+    $('#result').innerHTML = '';
+    await loadCandidates();
+  } catch (err) { toast(err.message); }
+});
+
+boot();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs('prebuy'));</script>
+</body>
+</html>

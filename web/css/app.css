@@ -1,0 +1,1471 @@
+/* ══════════════════════════════════════════════════════════════════
+   胶囊衣橱 · 视觉系统 —— 暖调精品店（fashion-editorial）
+   ══════════════════════════════════════════════════════════════════
+
+   上一版走的是"iOS 设置页"：灰底 + 白圆角卡 + 胶囊按钮 + 蓝/绿/红三个强调色。
+   问题在截图里是看得见的（三处都实测确认过）：
+     · 卡片做成 18px 大圆角 + 胶囊按钮 + 毛玻璃 —— 那是**手机 App**的语法，
+       不是服装品牌的语法。放在"看衣服"的产品上，观感像后台管理面板。
+     · 蓝（按早晚）、绿（就穿这套）、红粉（不喜欢）三个强调色同时出现，
+       没有一个主色，眼睛不知道该看哪。
+     · 控件是浏览器原生的（select / date / range 四种圆角四种字号），
+       一眼"没做完"。
+
+   这一版的五条规矩（都是可指认的，不是形容词）：
+
+     1. **纸感底色** —— 底不是纯白也不是冷灰，是温暖的米砂 `#f4f0ea`；
+        卡是 `#fffefc`，靠这层暖色差分区。整个产品的温度从这里来。
+     2. **直角 + 细线** —— 圆角收到 2~4px，卡片有 1px 暖灰细线、**没有阴影**。
+        精品店的空间是靠"线和留白"分出来的，不是靠光影。
+     3. **只有一个行动色** —— 墨黑。主按钮 = 墨黑实心，次按钮 = 细线描边，
+        删除/不喜欢 = 陶土红描边（**描边不是填充**，降一级）。
+        绿和红只留给"结论"（能穿/穿不上），不再当按钮底色。
+     4. **大字距** —— 中文用 `.02em~.10em` 的正字距做层级（上一版是负字距收紧，
+        那是苹果大标题的语法）。小标签靠字距拉开，不靠加粗。
+     5. **衬线只上大标题和数字** —— `Georgia + 宋体`。正文一律无衬线。
+        实测过：本机中文字体只有宋体（无 Noto Serif SC），宋体的 Latin 很旧，
+        所以**只让纯中文标题和无衬线数字之外的地方碰它**，绝不能全站铺开。
+        ⚠️ 宋体没有真粗体，**绝不能给它 font-weight ≥600** ——
+        浏览器会伪粗，糊成一团。靠字号拉层级，不靠字重。
+
+   ⚠️ **只改值、不改类名**。7 个页面共用这一份 CSS；
+   改类名 = 页面当场失效。外部还有内联引用（JS/HTML 里写死的
+   `var(--red)` `var(--text2)` `var(--surface2)` `--accent` `--amber` `--radius-sm` …），
+   **变量名一个都不能重命名，只能换值**。
+   ══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ⚠️⚠️ 必须是 `light dark`，**绝对不能写 `only light`**（2026-09-27 更正）。
+
+     我上一轮写的是 `only light`，理由是"告诉浏览器本页只支持浅色"。
+     **那是反的**：声明"拒绝深色"恰恰是**触发浏览器强制暗化接管**的条件 ——
+     浏览器/系统的夜间模式（Chrome 的 Auto Dark、安卓 WebView 的 ForceDark、
+     Alook 这类 iOS 浏览器的夜间模式）发现页面"不肯适配深色"，就会自己动手
+     对整页做反色/压暗处理，**绕过全部 CSS**。结果就是用户实拍的
+     "整页黑、计划套装都看不到、按钮分不清"。
+     实测：这种处理会把底栏文字与背景的对比度从 15.6:1 压到 **1.01:1** —— 字彻底消失。
+
+     **正解是反过来**：声明页面自己支持深色（`light dark`）+ 真的写一套深色配色，
+     这些实现就会**跳过本页**，交由我们自己的配色渲染。
+     于是"深色模式"从"躲不掉的外来破坏"变成"我们完全控得住的一套设计"——
+     这也是用户要的"不用每次手动切夜间模式"：跟着系统自动切，且切换后每个颜色都可辨。
+     深色配色见文件下方 `@media (prefers-color-scheme: dark)`。 */
+  color-scheme: light dark;
+
+  /* ── 纸与砂 ── */
+  --bg: #f4f0ea;             /* 页面底：暖米砂 */
+  --surface: #fffefc;        /* 卡片：微暖白，从砂底上"浮"起来 */
+  --surface2: #f1ece4;       /* 卡内嵌入块 */
+  --surface3: #e6dfd4;       /* 更深一层（轨道、占位） */
+
+  /* ── 墨：三级暖中性，不是冷灰 ── */
+  --text: #191714;
+  --text2: #6b6157;
+  /* ⚠️ 三级文字原来是最浅的 #9b9186，在纸感底 (#f4f0ea) 上只有 **3.0:1** ——
+     11px 的小字要 4.5:1 才达 AA，它连正常看都勉强。
+     被手机的「强制暗化」（浏览器/系统的夜间模式，见下）压过之后直接糊没：
+     用户实拍反馈「底栏的『计划』『套装』根本看不到、分不清哪些是按钮」。
+     → 收到 #7d7266（4.6:1）。**层次没丢**（text 15:1 / text2 6.2:1 / text3 4.6:1），
+     但它从"装饰性的浅灰"变成了"真的读得清的最弱一级"。 */
+  --text3: #7d7266;
+
+  /* ── 线：暖灰细线。分区全靠它 ── */
+  --border: #e2dbd0;
+  /* ⚠️ 同理：这个颜色主要落在**按钮和输入框的边框**上，
+     它和纸底的对比度原来只有 **1.5:1** —— 等于"按钮没有边界"，
+     暗化之后更是完全分不出哪里能点。→ 收到 #bcaf9b（2.2:1）。 */
+  --border2: #bcaf9b;
+
+  /* ── 唯一的行动色：墨黑 ──
+     选中态不用彩色，用砂色底 + 墨黑描边。 */
+  --accent: #191714;
+  --accent-press: #000000;
+  --accent-bg: #eee8de;
+
+  /* ── 结论色（只用于表达"能不能穿"，不当按钮底色）──
+     --green/--red/--amber 这三个名字被 JS 内联引用着，不能改名。 */
+  --green: #55663f;          /* 橄榄绿，比上一版的 #1a7f4b 灰一档 */
+  --green-bg: #eef0e6;
+  --red: #a4563c;            /* 陶土红，比纯红温和，配暖底才不刺 */
+  --red-bg: #f7ebe5;
+  --amber: #8d6d29;          /* 赭黄 */
+  --amber-bg: #f7f0de;
+
+  /* 结论标签 / 危险按钮的**描边**。
+     它们原来是写死的十六进制（#c2cbae / #dcc0b5 / #ddcda0），
+     写死的颜色**不随主题走** —— 深色下这三个浅色框会亮得刺眼。抽成变量。 */
+  --green-border: #c2cbae;
+  --red-border: #dcc0b5;
+  --amber-border: #ddcda0;
+
+  /* ── 几何：直角 ── */
+  --radius: 4px;
+  --radius-sm: 3px;
+  --radius-xs: 2px;
+  --pill: 2px;               /* 胶囊按钮在这个语言里不存在 */
+
+  /* ── 阴影：不用 ──
+     上一版"无边框 + 浅阴影"和注释是矛盾的（代码里其实有边框）。
+     精品店的层次是线和留白做出来的，阴影只留给真正浮起的层（toast）。 */
+  --shadow-1: none;
+  --shadow-2: none;
+  --shadow-press: none;
+
+  --ease: cubic-bezier(.32, .72, 0, 1);
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+
+  --blur: saturate(140%) blur(18px);
+  --glass: rgba(244, 240, 234, .88);
+  /* 覆盖式面板的遮罩（「改字段」掀出来的那张）。深色主题下有另一份，见下方。 */
+  --mask: rgba(24, 18, 12, .42);
+
+  /* 衬线：只有页面大标题和大数字能用。
+     Georgia 先命中（它的数字是 old-style，很"杂志"），中文落到宋体。 */
+  --serif: Georgia, "Songti SC", "Source Han Serif SC", "Noto Serif CJK SC",
+           SimSun, "Times New Roman", serif;
+}
+
+/* ══ 深色模式 ══
+   跟着手机系统的 `prefers-color-scheme: dark` 自动切 —— **用户不用手动改任何设置**。
+
+   ⚠️ 这一版是**重做**的（2026-09-27）。旧版之所以被下线，不是因为"深色不好"，
+   而是因为**层次没拉开**：底 #141210 / 卡 #1e1a17 / 按钮框 #423b35，
+   互相只有 1.1:1 和 1.7:1 —— 等于"卡片没边、按钮没框"。
+   用户实拍反馈"整页全黑、分不清哪些是按钮"。**问题在对比度，不在深色本身。**
+
+   重做的三条规矩（每条都带实测对比度，都是对**页面底 #1a1917** 算的）：
+
+     1. **底不要死黑** —— 用暖深褐 #1a1917。纯黑配暖色会发灰，而且死黑没有层次。
+     2. **卡片必须"浮"得起来** —— 卡 #302c28 比底亮（1.27:1），再配一条 1.8:1 的细线。
+        深色下不靠阴影分层（阴影在深色里根本看不见），全靠**亮度差 + 线**。
+     3. **能点的东西必须有框** —— --border2 提到 #6b6157（2.9:1）。
+        旧版按钮框只有 1.7:1，那才是"看不出哪里能点"的真正原因。
+        这一条同时也修了浅色主题（那边从 1.5:1 提到 2.2:1）。
+
+   文字三级：15.5:1 / 6.6:1 / 5.1:1 —— 最弱的一级也过 AA（对比浅色主题的 15:1 / 6.2:1 / 4.6:1，
+   深色下整体再强一点，因为暗环境里人眼对小字更吃力）。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1917;             /* 页面底：暖深褐（浅色文字在它上面 15.5:1） */
+    --surface: #302c28;        /* 卡片：比底亮一档（1.27:1） */
+    --surface2: #3a3531;       /* 卡内嵌入块 */
+    --surface3: #45403a;       /* 更深一层（轨道、占位） */
+
+    --text: #f5f0e8;           /* 15.5:1 */
+    --text2: #a89d91;          /*  6.6:1 */
+    --text3: #93887c;          /*  5.1:1 —— 小字也要达 AA */
+
+    --border: #4a443d;         /* 1.8:1 —— 卡片边界 */
+    --border2: #6b6157;        /* 2.9:1 —— 按钮/输入框的框，一眼看出"这里能点" */
+
+    /* 深色下"墨黑"反转成米白 —— 按钮仍是"最亮的那块" */
+    --accent: #f5f0e8;
+    --accent-press: #ffffff;
+    --accent-bg: #332e2a;
+
+    /* 结论色在深底上要提亮，否则橄榄绿/陶土红会糊掉 */
+    --green: #a4b98a;
+    --green-bg: #242a1e;
+    --red: #dd8f72;
+    --red-bg: #2e211b;
+    --amber: #d9b972;
+    --amber-bg: #2b2517;
+
+    /* 描边在深色下要反过来"比结论色更深"，浅框在深底上会刺眼 */
+    --green-border: #485236;
+    --red-border: #6b4030;
+    --amber-border: #5c4a26;
+
+    --glass: rgba(26, 25, 23, .86);
+    /* ⚠️ 遮罩必须**分主题**。浅色下 rgba(24,18,12,.42) 盖在纸底 #f4f0ea 上
+       一眼可见；同样这个值盖在深色底 #1a1917 上算出来是 (25,20,18) vs 底 (26,25,23)
+       —— **差 2%**，等于没盖：用户看不出页面"在下面"，以为顶栏那些还能点。
+       实测过（截图像素对比），不是推测。 */
+    --mask: rgba(0, 0, 0, .68);
+  }
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+        "Helvetica Neue", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  padding-bottom: 96px;               /* 给固定底部导航留位 */
+  overflow-wrap: break-word;
+}
+
+a { color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border2); }
+a:active { opacity: .55; }
+/* 卡片标题里的链接不要下划线，太吵 */
+.card h2 a, .btn, .tabs a, .cityhit, .gear { border-bottom: none; }
+
+/* ── 顶栏 ──
+   大标题用衬线（Georgia 的数字 + 宋体的中文），字距**放开**而不是收紧。
+   上一版这里是负字距的 21px 无衬线，和正文 15px 几乎同级 —— 没有层级。
+   ⚠️ 宋体无真粗体，font-weight 必须是 400，否则伪粗糊成一片。 */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--border);
+  /* ⚠️ 顶部也要让开安全区。底部导航很早就处理了（见 .tabs 的
+     `env(safe-area-inset-bottom)`），顶部一直没管 —— 在浏览器里没问题，
+     但「添加到主屏幕」之后是 standalone、没有地址栏，
+     iPhone 的刘海 / 灵动岛会直接压在大标题上。
+     普通浏览器里这个值恒为 0，所以加了不影响桌面。 */
+  padding: calc(15px + env(safe-area-inset-top, 0px)) 18px 13px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+  align-items: center;
+}
+.topbar h1 {
+  grid-row: 1; grid-column: 1;
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 25px; font-weight: 400;
+  letter-spacing: .03em;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.topbar .sub {
+  grid-row: 2; grid-column: 1;
+  font-size: 11.5px; color: var(--text3);
+  letter-spacing: .03em; line-height: 1.5; margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar .gear {
+  grid-row: 1 / span 2; grid-column: 2;
+  font-size: 11.5px; letter-spacing: .08em;
+  /* 手机端实测 53×34：这是每页右上角唯一的入口，34 偏矮。撑到 40。 */
+  padding: 10px 14px;
+  border: 1px solid var(--border2); border-radius: var(--radius-xs);
+  color: var(--text2); background: transparent;
+  transition: background .2s var(--ease), color .2s var(--ease);
+}
+.topbar .gear:active { background: var(--accent-bg); color: var(--text); }
+
+.wrap { padding: 16px 14px 8px; max-width: 780px; margin: 0 auto; }
+
+/* ── 卡片 ──
+   1px 暖灰细线，**无阴影**。标题下压一条细线 —— 这一条是"编排感"的主要来源：
+   每张卡变成了一个有名字的段落，而不是一个圆角盒子。 */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 16px 18px;
+  margin-bottom: 12px;
+}
+.card h2 {
+  font-size: 14px; font-weight: 600; letter-spacing: .06em;
+  margin: 0 0 13px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  /* ⚠️ 这里**不能**用 display:flex：设置页和录入页的 h2 里有 `<br>` 和内联 span，
+     变成 flex 容器后 `<br>` 不再换行，那几处标题会当场挤成一行。 */
+}
+.card h2 .muted { font-weight: 400; letter-spacing: .02em; }
+.card h3 {
+  font-size: 11.5px; font-weight: 600; letter-spacing: .09em;
+  margin: 18px 0 9px; color: var(--text3);
+}
+/* 标题里最后挂着的标签别跟着标题的字距跑 */
+.card h2 .tag { letter-spacing: .04em; vertical-align: 1px; }
+
+/* 标题和右侧按钮同一行时（试穿间「候选件」+「录一件想买的」）：
+   标题必须撑满剩余宽度，那条细线才会一直顶到按钮左边。
+   不加这条的话 h2 变成 flex item、宽度只有文字那么宽 ——
+   实测细线只剩 40px 一小截，看着像画歪了。 */
+.row > h2 { flex: 1 1 auto; min-width: 0; margin: 0; padding-bottom: 7px; }
+
+.muted { color: var(--text3); font-size: 13px; }
+.sec { color: var(--text2); font-size: 13px; }
+.note {
+  font-size: 12.5px; color: var(--text3);
+  margin-top: 9px; line-height: 1.7; letter-spacing: .01em;
+}
+/* 卡片里最后一段说明不要多出一段空白 */
+.card > .note:last-child { margin-bottom: 0; }
+
+/* ── 按钮 ──
+   两种：墨黑实心（主）/ 细线描边（次）。删除类用陶土红的**描边**，不填充。 */
+.btn {
+  appearance: none; font-family: inherit; cursor: pointer;
+  display: inline-block;
+  border: 1px solid var(--border2); background: transparent; color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 11px 17px; font-size: 13px; font-weight: 500; letter-spacing: .06em;
+  transition: background .2s var(--ease), color .2s var(--ease),
+              border-color .2s var(--ease), transform .18s var(--ease);
+}
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.btn.primary:active { background: var(--accent-press); border-color: var(--accent-press); }
+/* 「就穿这套」原来是绿色实心 —— 绿是"结论色"，当按钮底色就是第三个强调色。
+   改成墨黑实心：全站只有一个行动色。 */
+.btn.ok { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.btn.danger { border-color: var(--red-border); color: var(--red); }
+.btn.block { display: block; width: 100%; text-align: center; }
+/* 手机端实测只有 32 高 ——「改字段」「删」「重识别」「我自己给温度」全中招。
+   撑到 38：次级按钮在手机上的下限。（Apple 建议 44，但这个语言里次级按钮是
+   细线小牌，38 是"看得清编排"和"点得中"之间的平衡点。） */
+.btn.sm { padding: 9px 14px; font-size: 12.5px; min-height: 38px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row.end { justify-content: flex-end; }
+
+/* ── 表单 ──
+   上一版这里是"浏览器原生控件 + 半吊子圆角"，四种控件四种长相。
+   现在全部统一样式，下拉箭头自己画（原生箭头各平台不一样，而且配不上细线语言）。 */
+label {
+  display: block; font-size: 11px; color: var(--text3);
+  letter-spacing: .09em; margin: 14px 0 6px;
+}
+input, select, textarea {
+  width: 100%; padding: 11px 12px; font: inherit; font-size: 14px;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  appearance: none; -webkit-appearance: none;
+  transition: border-color .18s var(--ease);
+}
+select {
+  padding-right: 34px;
+  /* 自绘下箭头：12×7 的直角 V，和整体的直角语言一致。
+     原生箭头各平台长相不同，而且配不上细线语言。
+     ⚠️ 颜色写死在 data URI 里，**不跟着 CSS 变量走**，得手动跟 --text3 同步
+     （浅色 #7d7266 / 深色 #93887c，深色那份在下面）。 */
+  background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='7'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%237d7266' stroke-width='1.4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 13px center;
+}
+/* 深色下箭头要换一个色 —— data URI 里是写死的十六进制，
+   它不跟着 CSS 变量走，**两套主题必须各写一份**（漏一份 = 深色下箭头看不见）。 */
+@media (prefers-color-scheme: dark) {
+  select {
+    background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='7'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%2393887c' stroke-width='1.4'/%3E%3C/svg%3E");
+  }
+}
+input[type=date] { padding-right: 12px; }
+input::placeholder, textarea::placeholder { color: var(--text3); }
+/* 聚焦：边框变墨黑。上一版是蓝色描边 + 光晕 —— 那是 iOS，不是精品店。 */
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--text);
+}
+textarea { resize: vertical; min-height: 60px; line-height: 1.6; }
+
+/* ⚠️ iOS Safari 的硬规则：输入框 `font-size < 16px` 时，**一聚焦就把整页放大**
+   —— 用户看到的是"点一下输入框，页面突然变大，还得手动缩回去"。
+   桌面上不需要这么大的字，所以只在**触屏设备**上提上去：
+   `hover:none` + `pointer:coarse` 精准命中手机/平板，鼠标设备不受影响。
+   例外：分段行程那个窄下拉（.segdays 只有 76px）放不下 16px，单独退回 14px。 */
+@media (hover: none) and (pointer: coarse) {
+  input:not([type=checkbox]):not([type=radio]):not([type=range]),
+  select, textarea { font-size: 16px; }
+  .segdays { font-size: 14px; }
+}
+
+/* 滑杆：2px 细轨 + 方形墨黑滑块（圆滑块是 iOS 语法，方的是编排语法） */
+input[type=range] {
+  padding: 0; background: transparent; border: none;
+  height: 26px; cursor: pointer;
+}
+input[type=range]:focus { border: none; }
+input[type=range]::-webkit-slider-runnable-track {
+  height: 2px; border-radius: 0; background: var(--border2);
+}
+input[type=range]::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  width: 15px; height: 15px; border-radius: 1px;
+  background: var(--text); border: none;
+  margin-top: -6.5px; cursor: pointer;
+}
+input[type=range]::-moz-range-track { height: 2px; border-radius: 0; background: var(--border2); }
+input[type=range]::-moz-range-thumb {
+  width: 15px; height: 15px; border-radius: 1px;
+  background: var(--text); border: none; cursor: pointer;
+}
+
+/* 原生 checkbox / radio 是这套语言里最出戏的一个控件 —— 此前它完全是
+   浏览器默认长相（一个蓝色方框）。`accent-color` 一行就把它换成全站唯一的
+   行动色。滑杆是自绘的，不受这条影响。 */
+input[type=checkbox], input[type=radio] { accent-color: var(--text); }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 10px; }
+
+/* ── 指标格 ── */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 1px;
+           background: var(--border); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.metric { background: var(--surface); padding: 13px 14px; }
+.metric .k { font-size: 11px; color: var(--text3); letter-spacing: .07em; }
+.metric .v {
+  font-family: var(--serif);
+  font-size: 27px; font-weight: 400; margin-top: 5px;
+  letter-spacing: .01em; font-variant-numeric: tabular-nums;
+}
+.metric .v.good { color: var(--green); }
+.metric .v.bad { color: var(--red); }
+.metric .v.warn { color: var(--amber); }
+
+/* ── 标签：细线小牌，不填充 ── */
+.tag {
+  display: inline-block; font-size: 10.5px; font-weight: 500;
+  letter-spacing: .07em; line-height: 1.5;
+  padding: 2px 7px; border-radius: var(--radius-xs);
+  border: 1px solid var(--border2); background: transparent; color: var(--text2);
+  vertical-align: 1px;
+}
+.tag.ok { border-color: var(--green-border); background: var(--green-bg); color: var(--green); }
+.tag.bad { border-color: var(--red-border); background: var(--red-bg); color: var(--red); }
+.tag.warn { border-color: var(--amber-border); background: var(--amber-bg); color: var(--amber); }
+.tag.info { border-color: var(--border2); background: var(--accent-bg); color: var(--text); }
+
+/* ── 结论块 ── */
+.verdict { border-radius: var(--radius-sm); padding: 14px 16px; margin-bottom: 12px;
+           border-left: 2px solid currentColor; }
+.verdict.buy { background: var(--green-bg); color: var(--green); }
+.verdict.skip { background: var(--red-bg); color: var(--red); }
+/* 体检页「先给结论」用的中间档 —— 和 .verdictbox.idle 同一套语义，只是这里要显色。 */
+.verdict.warn { background: var(--amber-bg); color: var(--amber); }
+.verdict .label { font-size: 11px; font-weight: 600; letter-spacing: .1em; opacity: .85; }
+.verdict .text { font-size: 14.5px; margin-top: 6px; line-height: 1.65; color: var(--text); }
+/* 算式要占满整行 —— 六宫格里塞不下「15 × 8 × 4 = 480」。 */
+.metric.wide { grid-column: 1 / -1; }
+.metric.wide .v { font-size: 15px; }
+
+/* ── 列表行（枢纽件 / 孤岛件 / CPW 共用）── */
+.partner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 12px; border-radius: var(--radius-sm);
+  background: var(--surface2); margin-bottom: 5px;
+}
+.partner .img { width: 38px; height: 38px; border-radius: var(--radius-xs); object-fit: cover; background: var(--surface3); flex: none; }
+.partner .ph { width: 38px; height: 38px; border-radius: var(--radius-xs); background: var(--surface3); flex: none; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text3); }
+.partner .nm { flex: 1; min-width: 0; font-size: 14px; letter-spacing: .01em; }
+.partner .cnt {
+  font-size: 13px; font-weight: 600; color: var(--text); flex: none;
+  font-variant-numeric: tabular-nums; letter-spacing: .01em;
+}
+.partner.revive { background: var(--green-bg); }
+.partner.revive .cnt { color: var(--green); }
+
+.bar { height: 2px; border-radius: 0; background: var(--surface3); overflow: hidden; margin-top: 5px; }
+.bar > i {
+  display: block; height: 100%; background: var(--text);
+  transition: width .6s var(--ease-out);
+}
+.bar.revive > i { background: var(--green); }
+
+/* ── 底部导航 ──
+   图标 + 文字。选中态：文字变墨色 + 顶上一条 20px 的墨色短线。
+   上一版是"选中变蓝"—— 蓝在这个语言里已经不存在了。 */
+.tabs {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+  display: flex; justify-content: center;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.tabs-in { display: flex; flex: 1; min-width: 0; }
+/* ⚠️ 手机端实测（2026-09-27）：字号 9.5px 太小 —— 这是"App 的导航"，不是脚注。
+   放大到 11px，图标 21 → 22px，靠压缩 padding 保持总高不变（仍约 58px），
+   这样底栏不占更多屏幕，但字读得清了。
+   六个 tab 在 390px 宽下每格 65px，"新衣试穿"四个字 11px 约 46px，放得下。 */
+.tabs a {
+  position: relative;
+  flex: 1; text-align: center; padding: 8px 2px 9px;
+  font-size: 11px; letter-spacing: .03em; color: var(--text2); white-space: nowrap;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  transition: color .2s var(--ease);
+}
+.tabs a svg { width: 22px; height: 22px; display: block; }
+.tabs a.active { color: var(--text); }
+.tabs a.active::before {
+  content: ""; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  width: 20px; height: 2px; background: var(--text);
+}
+.tabs a:active { opacity: .5; }
+
+.empty { text-align: center; padding: 42px 16px; color: var(--text3); line-height: 1.8; }
+
+/* ── 单品卡 ── */
+.item-card {
+  display: flex; gap: 13px; padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); margin-bottom: 8px;
+}
+.item-card .thumb {
+  /* 4:5 竖版，和展示图画布一致 —— 不变形也不用裁两边。
+     ⚠️ 必须显式给 height，只写 aspect-ratio 时图片会按自身高度撑开，
+     网格里一行高一行矮。 */
+  width: 78px; height: 98px; border-radius: var(--radius-xs);
+  object-fit: cover; background: var(--surface2); flex: none;
+  border: 1px solid var(--border);
+}
+.item-card .thumb.ph { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text3); }
+.item-card .info { flex: 1; min-width: 0; }
+.item-card .nm { font-size: 14.5px; font-weight: 500; letter-spacing: .01em; line-height: 1.4; }
+.item-card .meta { font-size: 11.5px; color: var(--text3); margin-top: 5px; line-height: 1.6; letter-spacing: .01em; }
+
+/* ══ 一行一件：录入页的两份清单都从「卡片网」改成「行」 ══════════════════
+   实测数据（390×844 真机视口，无头浏览器量的真实几何）：
+     改前  待入库 358.6px/张 × 26 件 = 9596px ｜ 已入库 241.3px/行 × 27 件 = 5521px
+           → 整页 15945px ≈ 19 屏；而「改字段」一展开那**一行**从 241px 涨到
+             1065px，面板被挤在 info 栏里只有 **152px 宽**、20 个控件堆成 814px 高。
+     改后  待入库 ~154px/件 ｜ 已入库 ~70px/件 ｜ 改字段 → 掀一张盖住全屏的面板。
+
+   ⚠️ 只动容器与布局：字段、`_picked` 校验、`toPayload`、PATCH 逻辑一行不改 ——
+   这一页是这个项目的**死亡风险页**，录入成本一涨，整个应用就没人用了。 */
+
+/* ── 已入库：一行一件 ──
+   名字 / 摘要都只许一行：长了宁可截断也不换行（换行会把行高撑开，而且
+   checkmobile 会量「点删前后名字行数不变」）。 */
+.item-card.item-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin-bottom: 6px; }
+.item-card.item-row .thumb { width: 46px; height: 58px; }
+.item-card.item-row .info { display: flex; flex-direction: column; gap: 4px; }
+.item-card.item-row .nm { display: flex; align-items: center; gap: 7px; font-size: 13.5px; line-height: 1.3; }
+.item-card.item-row .nmtext { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-card.item-row .nm .tag { flex: none; }
+.item-card.item-row .meta {
+  margin-top: 0; font-size: 11px; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.item-card.item-row .acts { display: flex; gap: 6px; flex: none; }
+
+/* ── 改字段：掀一张只盖这一件的面板 ──
+   ⚠️ 面板上挂 `item-card` 类**只是为了**让 patchField 里的
+   `el.closest('.item-card')` 原样命中（字段解析 / 提交逻辑一行不改）。
+   所以下面这几条覆盖必须写在 `.item-card.item-sheet`（两个类）上 ——
+   单类 `.item-card` 是覆盖不掉 `.item-card { display:flex; padding:12px }` 的。 */
+.item-card.item-sheet {
+  position: fixed; inset: 0; z-index: 60;
+  margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: transparent; display: block;
+}
+.item-sheet .mask { position: absolute; inset: 0; background: var(--mask); }
+.item-sheet .sheet {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  max-height: 88vh; display: flex; flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border2); border-radius: 10px 10px 0 0;
+}
+.item-sheet .sheettop {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+.item-sheet .sheettitle {
+  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.item-sheet .sheetbody { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 14px 20px; }
+/* 面板里不再需要"上边那条线"（外面已经有分隔线了） */
+.item-sheet .gc-extra { border-top: 0; margin-top: 0; padding-top: 0; }
+.item-sheet .grid2 { gap: 0 12px; }
+.item-sheet .delrow {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.item-sheet .delhint { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text3); line-height: 1.55; }
+
+/* ── 待入库：一行一件（槽位那一下点击仍然在行内，不许省） ── */
+.gcard.prow { display: block; gap: 0; padding: 8px 10px; }
+.prow .p-top { display: flex; gap: 9px; align-items: flex-start; }
+.prow .p-mid { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.prow .gc-thumb { width: 46px; height: 56px; }
+.prow .acts { display: flex; gap: 6px; flex: none; align-items: center; }
+.prow .gc-slots {
+  margin-top: 6px; gap: 3px;
+  /* ⚠️ **必须 nowrap**。7 个槽位在 390px 里一行放不下时，wrap 会让「配饰」
+     单独掉到第二行并占满整行 —— 实测单卡因此从 162px 涨到 202px（+25%），
+     而那一行只有一个按钮，看着像坏了。
+     nowrap 之后：空间够 → 7 个平分；空间真不够（窄屏）→ 横向可滑。
+     横滑容器会被 checkmobile 的横向溢出扫描自动豁免（它认 overflow-x）。 */
+  flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+}
+.prow .gc-slots::-webkit-scrollbar { display: none; }
+/* 7 个槽位按钮的宽度预算（实测 390px 视口下可用 308px）：
+     内穿下装 4 字 41.6 + 8 padding = 49.6 ｜ 中间层 3 字 39.2 ｜ 其余 5 个 min-width 34
+     → 最小需求 258.8px，加 6×3 gap = 276.8 < 308 ✓（360px 窄屏需求 278 ✓ 也放得下）
+   字号 / padding / gap 任何一个往上调都会挤爆，改之前先回来看这一段。 */
+.prow .gc-slots button {
+  font-size: 10px; padding: 0 4px; min-width: 34px; height: 36px;
+  flex: 1 1 auto; white-space: nowrap;
+}
+.prow .p-bot { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.prow .p-bot select { width: 92px; flex: none; font-size: 12px; padding: 8px 24px 8px 8px; }
+.prow .gc-meta, .prow .p-sum {
+  flex: 1; min-width: 0; font-size: 11px; line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.prow .p-batches { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
+.prow .gc-warn { margin-top: 5px; }
+
+/* 「同一段提示重复印了 N 遍」收成列表顶一条（整批手机截图时 26 张卡会各印一遍） */
+.notehoist {
+  background: var(--amber-bg); color: var(--amber);
+  border-left: 2px solid currentColor; border-radius: var(--radius-sm);
+  padding: 10px 12px; font-size: 12px; line-height: 1.65; margin-bottom: 10px;
+}
+
+.upload-zone {
+  border: 1px solid var(--border2); border-radius: var(--radius);
+  padding: 28px 20px; text-align: center; color: var(--text3); font-size: 13.5px;
+  background: var(--surface2); cursor: pointer; letter-spacing: .02em;
+  transition: border-color .2s var(--ease), background .2s var(--ease);
+}
+.upload-zone:active { border-color: var(--text); background: var(--accent-bg); }
+
+.batch-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; background: var(--surface); }
+.batch-item.done { opacity: .45; }
+.batch-item .head { display: flex; gap: 10px; align-items: center; margin-bottom: 5px; }
+
+/* ── 录入卡片网格 ── */
+.grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 10px;
+}
+.gcard {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 11px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+/* 还没选过槽位的卡片：左侧一条赭黄短线，扫一眼就知道哪几张还没处理 */
+.gcard.need { border-left: 2px solid var(--amber); }
+
+.gc-top { display: flex; gap: 10px; align-items: flex-start; }
+.gc-thumb {
+  width: 78px; height: 98px; border-radius: var(--radius-xs); flex: none;
+  object-fit: cover; background: var(--surface2);
+  border: 1px solid var(--border);
+}
+.gc-thumb.ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--text3);
+}
+.gc-side { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+.gc-color { font-size: 11.5px; color: var(--text2); display: flex; align-items: center; gap: 5px; }
+.dot {
+  width: 10px; height: 10px; border-radius: 2px; flex: none;
+  /* inset 阴影当描边：border 会把色块撑到 12px，深浅两件衣服的色块就不一样大了 */
+  box-shadow: inset 0 0 0 1px rgba(90, 80, 70, .28);
+  display: inline-block;
+}
+.gc-warn { font-size: 11px; color: var(--amber); line-height: 1.5; }
+
+/* 未选槽位的提示条：不加这条，"全部入库"会把所有衣服静默存成默认的「内搭·T恤」 */
+.needbar {
+  background: var(--red-bg); color: var(--red);
+  border-radius: var(--radius-sm); padding: 11px 13px;
+  font-size: 12.5px; line-height: 1.6; margin-bottom: 10px;
+  border-left: 2px solid currentColor;
+}
+.btn:disabled { opacity: .35; cursor: not-allowed; transform: none; }
+/* 删除的两步确认：第一次点进入"待确认"状态，必须看得出已经变了 */
+.btn.armed {
+  background: var(--red); border-color: var(--red); color: var(--surface);
+  animation: armedpulse 1.1s var(--ease) infinite;
+}
+@keyframes armedpulse { 0%, 100% { opacity: 1 } 50% { opacity: .6 } }
+
+/* ⚠️ 两级确认的删除按钮**必须硬定宽**（width，不是 min-width）。
+   点第一下会换文案（「删」→「确认」），按钮在 flex 行里本来跟着内容走：
+   文案一长就撑宽，旁边的文字列被挤窄、整段介绍当场重排 ——
+   手机上看到的现象就是「点一下删，左边那行字变形了」。
+
+   ⚠️⚠️ 这里踩过**第二次**坑，务必别再退回去：
+   上一版只写了 `min-width:46px`，而 min-width **只是下限**。
+   内容一旦比 46px 宽（例如手机上仍是旧缓存的 HTML，文案还是
+   「再次点击确认删除」六个字），按钮照样被撑到 109px、照样把左边文字挤变形 ——
+   用户看到的现象就是"你说改好了，我刷新了还是一样"。
+   所以现在是 `width` + `0 0` 硬定宽，再加 `overflow:hidden` 兜底：
+   **文案再长也撑不开，宁可裁掉几个字，也绝不许挤走邻居。**
+
+   ⚠️ 选择器也不再绑父元素的 class（旧写法是 `.item-card >` / `.row >`）——
+   一旦结构改动（多包一层 div、换个容器类名）那几条规则会**静默失效**：
+   "按钮没定宽"不报错、不崩溃，只会让用户以为改动根本没生效。 */
+.btn.danger[data-del],
+.btn.danger[data-act="del"] {
+  flex: 0 0 46px; width: 46px; min-width: 46px; max-width: 46px;
+  padding-left: 0; padding-right: 0; text-align: center;
+  overflow: hidden; white-space: nowrap;
+}
+
+/* ⚠️ prebuy 空态里那句「没有照片？手动填一件」的链接，原来只有 63×17px ——
+   手机手指根本点不中（触控下限 36px），而它偏偏是**唯一**的录入兜底入口。
+   把留白撑成 39px 高；负 margin 把多出来的空间抵回去，
+   所以**视觉上那段文字一动不动**，只有热区变大。 */
+#manualLink {
+  display: inline-block;
+  padding: 11px 8px;
+  margin: -11px -8px;
+}
+
+.gc-name { padding: 8px 10px; font-size: 12.5px; }
+.gcard select, .gc-extra select { padding: 8px 26px 8px 10px; font-size: 12.5px;
+                                  background-position: right 9px center; }
+
+/* 槽位一键切换 —— 整个流程里唯一必须的输入 */
+.gc-slots { display: flex; flex-wrap: wrap; gap: 4px; }
+.gc-slots button {
+  appearance: none; font: inherit; font-size: 10.5px; letter-spacing: .04em; line-height: 1;
+  padding: 7px 8px; border-radius: var(--radius-xs); cursor: pointer;
+  border: 1px solid var(--border2); background: transparent; color: var(--text2);
+  flex: 1 0 auto; min-width: 44px;
+  transition: transform .16s var(--ease), background .16s var(--ease),
+              color .16s var(--ease), border-color .16s var(--ease);
+}
+.gc-slots button:active { transform: scale(.96); }
+.gc-slots button.on {
+  background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 600;
+}
+
+.gc-meta { font-size: 11px; color: var(--text3); line-height: 1.6; letter-spacing: .01em; }
+
+.gc-extra {
+  border-top: 1px solid var(--border); margin-top: 10px; padding-top: 4px;
+}
+.gc-extra label { margin: 10px 0 5px; }
+.gc-extra input, .gc-extra select, .gc-extra textarea { font-size: 12.5px; padding: 8px 10px; }
+
+/* ── 今日页：一套搭配 ──
+   三列纵向卡。图片锁 4:5（`aspect-ratio` + `height:auto`，border 用 inset 阴影
+   而不是 border —— 加了 border 会让高宽各多 2px，三列就不一样大了）。
+   ⚠️ 2 列 → 3 列是**首屏预算**的必要条件：390px 下单件图 174×217 → 104×130，
+   换来整套 5 件 + 理由 + 三个按钮全部落在首屏内（实测衣服占比 31% → 73%）。 */
+.outfit { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 9px; }
+.oi {
+  display: flex; flex-direction: column; gap: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  overflow: hidden;
+  animation: oiIn .44s var(--ease-out) both;
+}
+.oi:nth-child(2) { animation-delay: .05s; }
+.oi:nth-child(3) { animation-delay: .1s; }
+.oi:nth-child(4) { animation-delay: .15s; }
+.oi:nth-child(5) { animation-delay: .2s; }
+.oi:nth-child(6) { animation-delay: .25s; }
+@keyframes oiIn { from { opacity: 0; transform: translateY(9px) } to { opacity: 1; transform: none } }
+
+.oi .thumb {
+  display: block; width: 100%; height: auto; aspect-ratio: 4 / 5;
+  object-fit: cover; background: var(--surface3);
+  border: none; margin: 0;
+}
+.oi .thumb.ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--text3); aspect-ratio: 4 / 5;
+}
+/* ⚠️ 必须 flex 列 + `.wash` 用 `margin-top:auto` 钉底：
+   3 列网格里每格宽度一样，但**品名行数会不一样**（「深灰棉质T恤」两行、
+   「黑色皮质夹克」也两行 —— 可一旦某件是一行，那格的「洗了」就整体上移，
+   一排五个按钮高低参差，用户原话「有的在上面，有的在下面，就比较丑陋」）。
+   钉底之后就与内容行数无关，一排永远在同一条线上。 */
+.oi-info { padding: 9px 10px 11px; min-width: 0;
+           display: flex; flex-direction: column; flex: 1; }
+/* 3 列下每格只有 ~103px，色块又占掉 15px —— 六字品名会挤成「深灰棉质T / 恤」，
+   末行只剩一个字。`text-wrap: balance` 让浏览器把两行摊匀（不支持就退回原样，无副作用）。 */
+.oi-nm { font-size: 13px; font-weight: 500; line-height: 1.4; letter-spacing: .01em;
+         word-break: break-all; text-wrap: balance; }
+.oi-meta { font-size: 11.5px; color: var(--text3); margin-top: 4px; line-height: 1.5; letter-spacing: .03em; }
+
+/* 每件衣服上**两个按件动作**：「洗了」（这件今天不穿）/「不喜欢」（这件本身不喜欢）。
+   刻意做得很轻 —— 这一屏的主角是照片，不该被一个操作面板抢走注意力。
+   ⚠️ 两者都是"减号"，但代价不同（洗了明天就回来；不喜欢会影响以后的排序），
+   所以**用颜色和一条竖线分开**，别让手指点错。
+   ⚠️ `margin-top:auto` 挂在容器上（不是按钮上）—— 把这一整行钉到卡片底部，
+   品名/信息折成两行也不会高低不齐。 */
+.oi-acts {
+  margin-top: auto;
+  display: flex; align-items: stretch;
+  border-top: 1px solid var(--border2);
+}
+.oi-acts > button {
+  flex: 1 1 0; min-width: 0;
+  /* 触控区 ≥36px：手机端实测低于这个值手指点不中 */
+  min-height: 36px; padding: 9px 2px 8px;
+  border: none; background: none; font: inherit; cursor: pointer;
+  font-size: 11.5px; letter-spacing: .04em; white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.oi-acts .wash { color: var(--text3); }
+.oi-acts .wash:hover { color: var(--text); }
+.oi-acts .dislike { color: var(--red); border-left: 1px solid var(--border2); }
+.oi-acts > button:disabled { opacity: .45; cursor: default; }
+
+/* 洗衣篮里每一件都是能点回去的小标签：误点了、或者先干的先收回来。
+   （「全部恢复」是旁边那个按钮，这两个诉求不一样。） */
+.wash-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.wash-chip {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: inherit; font-size: 12px; letter-spacing: .03em;
+  /* 手机端实测 89×29 —— "从洗衣篮把某件收回来"的按钮，29 太矮。撑到 36。 */
+  padding: 8px 12px; border: 1px solid var(--border2); border-radius: var(--pill);
+  background: transparent; color: var(--text2); cursor: pointer;
+}
+.wash-chip:hover { border-color: var(--text); color: var(--text); }
+
+/* 底部动作行：**必须与上面的「洗了」拉开距离并隔一条线**。
+   两者都是"减号"动作，但作用域完全不同 ——「洗了」是这一件今天不穿，
+   「这套不喜欢」是评价这整一套。挨在一起时手一滑就点错（用户原话：
+   「如果离得太近的话，有可能会点错」）。一条分隔线 + 各自的说法把两者分开。 */
+.row.actrow {
+  margin-top: 20px; padding-top: 15px;
+  border-top: 1px solid var(--border2);
+}
+
+/* 穿完之后的体感：一行很轻的东西。它不该和「就穿这套」抢重量 ——
+   前者是"事后校准"，后者是这一屏唯一的行动色。 */
+.row.feelrow {
+  margin-top: 8px; gap: 6px; align-items: baseline;
+}
+.feel-lb { font-size: 12px; color: var(--text3); letter-spacing: .03em; }
+.feellink {
+  appearance: none; font: inherit; cursor: pointer;
+  /* 触控区 ≥36px：这两个是"事后补一句"，但那也得点得中 */
+  min-height: 36px; padding: 8px 10px;
+  border: 1px solid var(--border2); border-radius: var(--radius-xs);
+  background: transparent; color: var(--text2);
+  font-size: 12px; letter-spacing: .04em;
+  -webkit-tap-highlight-color: transparent;
+}
+.feellink:hover { border-color: var(--text); color: var(--text); }
+.feellink:disabled { opacity: .45; cursor: default; }
+
+/* 搭配理由：整屏唯一的"观点"，做成引用块（左侧一道墨线） */
+.reason {
+  margin-top: 16px; padding: 13px 15px;
+  background: var(--accent-bg);
+  border-left: 2px solid var(--text);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 13.5px; line-height: 1.75; color: var(--text);
+  letter-spacing: .015em;
+}
+
+.alt {
+  /* 备选行：左边 5 张真实缩略图 + 右边分数与一句差异说明。
+     服装是视觉品类 —— 让人读一长串衣服名再凭想象选，是"不符合用户习惯"的典型。 */
+  display: flex; gap: 11px; align-items: center;
+  padding: 12px 13px; border-radius: var(--radius-sm);
+  background: transparent; margin-bottom: 6px;
+  border: 1px solid var(--border); cursor: pointer;
+  transition: border-color .2s var(--ease), background .2s var(--ease), transform .2s var(--ease);
+}
+.altstrip { display: flex; gap: 4px; flex: none; }
+.altstrip img, .altstrip .ph {
+  display: block; width: 30px; height: 38px;
+  object-fit: cover; border-radius: var(--radius-xs);
+  background: var(--surface3); border: 1px solid var(--border);
+}
+.alt .altbody { flex: 1; min-width: 0; }
+.alt:active { transform: scale(.99); }
+.alt.on { border-color: var(--text); background: var(--accent-bg); }
+.alt-h { font-size: 13px; font-weight: 600; letter-spacing: .04em; }
+.alt-line { font-size: 12.5px; color: var(--text2); margin-top: 5px; line-height: 1.6; }
+
+.steps { display: flex; flex-direction: column; gap: 12px; }
+.step { display: flex; gap: 12px; font-size: 13.5px; line-height: 1.65; }
+.step b {
+  flex: none; width: 22px; height: 22px; border-radius: var(--radius-xs);
+  background: var(--text); color: var(--surface); font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; margin-top: 2px;
+  font-family: var(--serif);
+}
+
+/* ── 穿搭标签：一件衣服的叠穿能力 ──
+   只在 L1/L2 显示（L3 不可能被盖住，L4/L5 不参与叠穿）。 */
+.tagrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.tagbtn {
+  appearance: none; font: inherit; font-size: 11.5px; line-height: 1; letter-spacing: .05em;
+  /* 手机端实测 70×27 —— 太矮。改成 inline-flex + min-height 把高度钉死在 38，
+     不靠 padding 凑（字号一改高度就漂，而且 line-height:1 让 padding 算不准）。
+
+     ⚠️ **横向 padding 只有 10px，不能随手加**：这两个标签住在录入页卡片的右栏里，
+     而那一栏只有 155px 宽（左边那张图占掉了 140px）。实测：
+       padding 11px → 68+68+6 = 142，放得下（改前）
+       padding 13px → 76+76+6 = 158，**掉到第二行**（改后当场截到）
+       padding 10px → 70+70+6 = 146，放得下。
+     差 3px 就会换行。以后要动字号 / 字距 / padding，先回来看这一行。 */
+  display: inline-flex; align-items: center; min-height: 38px;
+  padding: 0 10px; border-radius: var(--radius-xs); cursor: pointer;
+  border: 1px solid var(--border2); background: transparent; color: var(--text3);
+  transition: background .18s var(--ease), color .18s var(--ease),
+              border-color .18s var(--ease), transform .18s var(--ease);
+}
+.tagbtn:active { transform: scale(.96); }
+.tagbtn.on { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 600; }
+.tagbtn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ── 疑似重复录入 ── */
+.duppair {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px; margin-bottom: 9px; background: var(--surface);
+}
+.dupwhy { font-size: 11.5px; color: var(--text3); margin-bottom: 10px; line-height: 1.6; }
+.duprow { display: flex; gap: 11px; }
+.dupcell { flex: 1; min-width: 0; }
+.dupcell img, .dupcell .ph {
+  display: block; width: 100%; height: 118px; border-radius: var(--radius-xs);
+  object-fit: cover; background: var(--surface2); border: 1px solid var(--border);
+}
+.dupcell .ph { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text3); }
+.dupcell .n { font-size: 12.5px; margin: 7px 0 4px; line-height: 1.4; word-break: break-all; }
+.dupcell .m { font-size: 11px; color: var(--text3); line-height: 1.5; margin-bottom: 8px; }
+
+.spin {
+  display: inline-block; width: 13px; height: 13px;
+  border: 1.5px solid var(--border2); border-top-color: var(--text);
+  border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px;
+}
+@keyframes sp { to { transform: rotate(360deg); } }
+
+table.cmp { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.cmp th, table.cmp td { padding: 9px 6px; border-bottom: 1px solid var(--border); text-align: right; }
+table.cmp th { font-size: 11px; color: var(--text3); font-weight: 500; letter-spacing: .07em; }
+table.cmp th:first-child, table.cmp td:first-child { text-align: left; color: var(--text2); }
+table.cmp tr.best td { background: var(--green-bg); font-weight: 600; }
+
+/* ══════════ 计划页：一周 / 旅行 ══════════ */
+
+/* 分段控件：选中的那一段是**白底浮起**（iOS 也这么做，但这里圆角收到 2px） */
+.seg {
+  display: flex; background: var(--surface2);
+  border-radius: var(--radius-sm); padding: 3px; gap: 3px;
+  margin-bottom: 12px;
+}
+.seg button {
+  appearance: none; font: inherit; font-size: 13px; font-weight: 500; flex: 1;
+  letter-spacing: .06em; padding: 9px 10px; cursor: pointer; border: none;
+  border-radius: var(--radius-xs);
+  background: transparent; color: var(--text3);
+  transition: background .22s var(--ease), color .22s var(--ease);
+}
+.seg button.on { background: var(--surface); color: var(--text); font-weight: 600; }
+
+/* ── 往后几天（时间轴）──
+   一行一天。三列**固定宽**：日期 / 温度 / 能穿几种。
+   ⚠️ 必须用 grid 的固定列，不能用 flex 让它自己撑 ——
+   "穿不出"三个字比"252 种"宽，那一列一变宽就会把温度挤到换行。
+   这个项目为此栽过：删按钮点一下变文案，把左边那段介绍挤得重排。 */
+.tlrows { border-top: 1px solid var(--border); margin-top: 4px; }
+.tlrow {
+  appearance: none; font: inherit; width: 100%; text-align: left; cursor: pointer;
+  display: grid; grid-template-columns: 88px 1fr 74px;
+  align-items: center; gap: 8px;
+  padding: 10px 8px 10px 12px;
+  background: transparent; color: var(--text);
+  border: none; border-bottom: 1px solid var(--border);
+  border-left: 2px solid transparent;
+  min-height: 46px;                    /* 手机可点下限是 36，留够 */
+  transition: background .18s var(--ease), border-color .18s var(--ease);
+}
+.tlrow.on { background: var(--surface2); border-left-color: var(--text); }
+.tlrow .tlday { font-size: 14px; letter-spacing: .04em; }
+.tlrow .tlday i { display: block; font-style: normal; font-size: 11px;
+                  color: var(--text3); letter-spacing: .06em; margin-top: 1px; }
+.tlrow .tlwx { font-size: 13.5px; color: var(--text2); }
+.tlrow .tlwx em { font-style: normal; font-size: 12px; color: var(--text3); }
+.tlrow .tln { font-size: 13px; text-align: right; color: var(--text2);
+              font-variant-numeric: tabular-nums; }
+.tlrow .tln.bad { color: var(--red); }
+
+.day {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 13px 14px 14px; background: var(--surface); margin-bottom: 8px;
+}
+.day.today { border-color: var(--border2); border-left: 2px solid var(--text); }
+.day .dh { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.day .dw { font-size: 14.5px; font-weight: 600; letter-spacing: .05em; }
+.day .dt { font-size: 11.5px; color: var(--text3); letter-spacing: .03em; }
+.day .dom {
+  font-size: 11.5px; color: var(--text2); margin-left: auto;
+  font-variant-numeric: tabular-nums; letter-spacing: .03em;
+}
+.day .dnote { font-size: 11.5px; color: var(--text3); margin-top: 9px; line-height: 1.7; }
+.day .dempty {
+  font-size: 12.5px; color: var(--red); background: var(--red-bg);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin-top: 9px; line-height: 1.6;
+  border-left: 2px solid currentColor;
+}
+
+/* 每日的衣服：横向滚动。缩略图锁 4:5，名字固定两行高度 ——
+   不锁的话每张卡高度不一，一周排下来参差不齐。 */
+.pstrip { display: flex; gap: 8px; overflow-x: auto; margin-top: 10px; padding-bottom: 4px; }
+.pstrip .pitem { flex: none; width: 70px; }
+.pstrip .pitem img, .pstrip .pitem .ph {
+  display: block; width: 70px; height: 88px; border-radius: var(--radius-xs);
+  object-fit: cover; background: var(--surface2); border: 1px solid var(--border);
+}
+.pstrip .pitem .ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--text3);
+}
+.pstrip .pitem .n {
+  font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 5px;
+  height: 31px; overflow: hidden;
+}
+
+.packrow {
+  display: flex; align-items: center; gap: 11px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  background: var(--surface2); margin-bottom: 4px;
+}
+.packrow img, .packrow .ph {
+  width: 34px; height: 43px; border-radius: var(--radius-xs); flex: none;
+  object-fit: cover; background: var(--surface);
+}
+.packrow .ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9.5px; color: var(--text3);
+}
+.packrow .pn { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.packrow .pw {
+  font-size: 11.5px; font-weight: 600; color: var(--text); flex: none;
+  font-variant-numeric: tabular-nums; letter-spacing: .04em;
+}
+
+/* 城市：这是**表格里的一格**，不是页面大标题。
+   上一版这里是 30px 的大字，而且和结果卡里的城市名重复显示了两次。 */
+.citynow {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 12px 13px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface2);
+  font-size: 14.5px; font-weight: 500; letter-spacing: .02em;
+}
+.citynow .k { font-size: 11px; color: var(--text3); letter-spacing: .09em; font-weight: 400; }
+.citynow.none { color: var(--amber); font-weight: 400; font-size: 12.5px; line-height: 1.6; display: block; }
+
+/* ── 分段目的地：一趟行程可以待不止一个地方 ──
+   这一块是**列表**（"京都 3 天 / 大阪 3 天"），不是"表格里的一格"。所以行与行
+   之间靠 1px 暖灰细线分隔，行内控件全部收到 12px 上下 —— 它们都不该跟
+   「排出来」那个主按钮抢注意力。
+   390px 一行要塞下：序号 / 地名 / 日期 / 天数 / 删除，地名必须能省略号收尾。 */
+.segrow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 0; border-bottom: 1px solid var(--border);
+}
+.segrow:first-child { padding-top: 2px; }
+.segidx {
+  flex: none; width: 17px; height: 17px; line-height: 17px; text-align: center;
+  font-size: 10.5px; color: var(--surface); background: var(--text);
+  border-radius: var(--radius-xs); font-variant-numeric: tabular-nums;
+}
+.segnm {
+  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; letter-spacing: .02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.segdt {
+  flex: none; font-size: 11px; color: var(--text3);
+  font-variant-numeric: tabular-nums; letter-spacing: .03em;
+}
+/* 段内天数：复用全局 select 的自绘箭头，只把宽度收窄 */
+.segdays {
+  flex: none; width: 76px; padding: 6px 24px 6px 9px; font-size: 12px;
+  background-position: right 8px center;
+}
+.segdel {
+  flex: none; width: 24px; height: 24px; padding: 0; border: none;
+  background: transparent; color: var(--text3); cursor: pointer;
+  font-size: 15px; line-height: 1; border-radius: var(--radius-xs);
+}
+.segdel:active { background: var(--accent-bg); color: var(--red); }
+.segtotal {
+  font-size: 11.5px; color: var(--text2); letter-spacing: .04em;
+  padding-top: 9px; font-variant-numeric: tabular-nums;
+}
+
+/* 分段之后「排几天」收起来了，出发日独占一行（否则右半格空着，像缺了个控件） */
+.grid2.one { grid-template-columns: 1fr; }
+
+/* 「去过哪几段」一条链。**只在两段以上出现** —— 一段的时候它就是多余的，
+   而"我在几个地方"这件事恰恰只在两段以上才是信息。 */
+.segchain { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.segchip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  border: 1px solid var(--border); border-radius: var(--radius-xs);
+  padding: 4px 9px; font-size: 12px; letter-spacing: .03em;
+}
+.segchip .n { font-size: 10.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+.segplus { color: var(--text3); font-size: 11px; }
+.segchain .segtotal { padding-top: 0; margin-left: 2px; }
+
+/* 每段第一天的小标题 —— 结果页里**唯一**能看出"哪天换了地方"的地方。
+   每天重复挂一个地名会变成噪音，反而看不出分界。 */
+.dayseg {
+  display: flex; align-items: baseline; gap: 7px;
+  margin: -1px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
+.dayseg b { font-size: 13px; font-weight: 600; letter-spacing: .06em; }
+.dayseg span { font-size: 11px; color: var(--text3); letter-spacing: .03em; }
+
+/* 手填温度的日期分组标题（同上：只在换了地方那一行出现） */
+.pkseg {
+  font-size: 12px; color: var(--text2); letter-spacing: .05em;
+  margin: 14px 0 7px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.pkseg:first-of-type { margin-top: 6px; }
+
+.cityhit {
+  display: block; width: 100%; text-align: left; font: inherit; font-size: 13.5px;
+  padding: 11px 13px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text); margin-bottom: 6px; border-bottom: 1px solid var(--border);
+  transition: background .18s var(--ease), transform .18s var(--ease);
+}
+.cityhit:active { background: var(--accent-bg); transform: scale(.99); }
+
+/* 天气来源那一行：今日页顶上的「13℃ 巴黎 · 阴 13~26℃」 */
+.wxrow {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--text2); letter-spacing: .02em;
+}
+.wxrow .big {
+  font-family: var(--serif);
+  font-size: 33px; font-weight: 400; color: var(--text);
+  letter-spacing: .01em; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 温控条 + 步进器（今日页 / 体检页共用一套形态）──
+   上一版首页把温度做成"标签 + 滑杆 + 读数"，同屏还有天气的 33℃ 和天气区间的
+   23~33℃ —— 三个温度数字并排、两个用衬线大字，用户没法判断"到底按几度给我挑的"。
+   现在：**整屏只有一个大数字**，就是真正用来挑衣服的那个；
+   城市与天气区间降为 12px 次级信息；控制全部收进默认收起的面板里。
+
+   `.ctlbar` 是两行 flex：行 1 = 大数字 + 天气摘要 + 「调」，行 2 = `.tl`（占满整行）。 */
+.ctlbar {
+  display: flex; align-items: baseline; gap: 6px 10px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px;
+}
+.ctlbar .tv {
+  font-family: var(--serif); font-size: 27px; font-weight: 400;
+  line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: .01em;
+}
+.ctlbar .wx {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12px; color: var(--text2); letter-spacing: .02em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctlbar .wx.off { color: var(--text3); }
+.ctlbar .tl { flex: 1 0 100%; font-size: 11.5px; color: var(--text3); letter-spacing: .03em; }
+/* 细线文字按钮，和每件衣服上的「洗了」同一套语言 ——
+   这里不该出现实心按钮：全站只有一个行动色，它属于「就穿这套」。 */
+.ctlbar .go {
+  appearance: none; font: inherit; cursor: pointer;
+  margin-left: auto; flex: none;
+  /* 手机端实测 36×30 ——「调」是改温度的唯一入口，30 太矮。撑到 39。
+     横向 padding 只加 2px：ctlbar 里这一行还有天气文字，别把它挤下去。 */
+  font-size: 11.5px; letter-spacing: .06em; padding: 10px 13px;
+  border: 1px solid var(--border2); border-radius: var(--radius-xs);
+  background: transparent; color: var(--text2);
+  transition: border-color .2s var(--ease), color .2s var(--ease);
+}
+.ctlbar .go:active { border-color: var(--text); color: var(--text); }
+
+/* ⚠️ `hidden` 靠浏览器默认样式表的 `display:none` 生效，而下面这些元素**自己声明了
+   `display:flex`** —— 作者样式优先级高于 UA 样式，于是 `hidden` 被顶掉：
+   明明是"隐藏"的，却仍然在页面上留一条**空米色带**（截图里一眼就能看见）。
+   这类"CSS 绕过 hidden"的坑跟 §九 ⑪ 是同族，必须显式兜住。 */
+#kitbar[hidden], #anchorbar[hidden], #kitsheet[hidden], #avoided[hidden] {
+  display: none !important;
+}
+
+/* 「围绕某件搭」的常驻细行。功能藏进折叠面板 = 功能不存在（被报过）。 */
+#anchorbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 6px 12px; margin-bottom: 12px;
+  font-size: 12.5px; letter-spacing: .03em; color: var(--text2);
+}
+#anchorbar .abtn {
+  appearance: none; font: inherit; cursor: pointer; flex: 1 1 auto;
+  min-height: 36px; padding: 4px 0; text-align: left;
+  border: none; background: none; color: var(--text2);
+  -webkit-tap-highlight-color: transparent;
+}
+#anchorbar .abtn:hover { color: var(--text); }
+#anchorbar .atag {
+  flex: none; font-size: 11px; letter-spacing: .08em; font-weight: 600;
+  color: var(--surface); background: var(--text); border-radius: var(--pill);
+  padding: 3px 9px;
+}
+#anchorbar .atext { flex: 1 1 auto; min-width: 0; }
+#anchorbar .aclear {
+  appearance: none; font: inherit; cursor: pointer; flex: none;
+  min-height: 36px; padding: 4px 2px; border: none; border-radius: 0;
+  background: none; font-size: 12px; color: var(--text2);
+  border-bottom: 1px solid var(--border2);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 旅行模式状态条：**两行的细条**，不是卡片 —— 首屏的垂直预算要留给衣服。
+   第 1 行「旅行模式」+ 退出，第 2 行行程说明（独占一行 → 不用省略号截断，
+   手机上"到底限制了什么"必须看全）。
+   ⚠️ 触控区必须 ≥36px（和全站一样），否则手机上"退出"点不中。 */
+#kitbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  background: var(--accent-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 8px 12px 10px; margin-bottom: 12px;
+  font-size: 12.5px; letter-spacing: .03em; color: var(--text2);
+}
+#kitbar .kittag {
+  flex: none; font-size: 11px; letter-spacing: .08em; font-weight: 600;
+  color: var(--surface); background: var(--text); border-radius: var(--pill);
+  padding: 3px 9px;
+}
+#kitbar .kittext { flex: 1 0 100%; min-width: 0; line-height: 1.5; }
+#kitbar .kitbtn {
+  appearance: none; font: inherit; cursor: pointer; flex: none;
+  margin-left: auto; padding: 9px 2px 8px;
+  border: none; border-bottom: 1px solid var(--border2); border-radius: 0;
+  background: none; font-size: 12px; letter-spacing: .05em; color: var(--text2);
+  -webkit-tap-highlight-color: transparent;
+}
+#kitbar .kitbtn:hover { color: var(--text); border-color: var(--text); }
+
+/* 温度步进器：按下即重算。
+   为什么不是滑杆：核心组合数是**阶跃**的（实测 16→17℃ 核心组合 32→128，
+   20→21℃ 叠穿变体 1056→308）。390px 宽下滑杆每像素约 0.13℃、手指精度 ±5~8px，
+   而输入事件只改读数、松手才重算 —— 1℃ 的误差能砍掉七成可用搭配。 */
+.stepper { display: flex; align-items: center; gap: 10px; margin: 8px 0 4px; }
+.stepper button {
+  appearance: none; font: inherit; cursor: pointer; flex: none;
+  width: 44px; height: 36px; padding: 0; font-size: 17px; line-height: 1;
+  border: 1px solid var(--border2); border-radius: var(--radius-xs);
+  background: transparent; color: var(--text);
+  transition: background .18s var(--ease), border-color .18s var(--ease);
+}
+.stepper button:active { background: var(--accent-bg); }
+.stepper button:disabled { opacity: .35; cursor: not-allowed; }
+.stepper .sv {
+  flex: 1; text-align: center;
+  font-family: var(--serif); font-weight: 400;
+  font-size: 27px; letter-spacing: .01em; font-variant-numeric: tabular-nums;
+}
+
+/* 已退役：上一版的「标签 + 滑杆」温控形态。两个页面都不再用它，
+   但类名留着（外部可能还有内联引用，删类名是静默失效的经典来源）。 */
+.tempctl {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin: 4px 0 10px;
+}
+.tempctl label { margin: 0; }
+.tempv {
+  font-family: var(--serif); font-weight: 400;
+  font-size: 27px; letter-spacing: .01em; font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* ══════════ 套装页：自己搭一套 ══════════ */
+
+.setcard {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 13px 14px; background: var(--surface); margin-bottom: 8px;
+}
+.setcard.off { opacity: .5; }
+.setcard .sh { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.setcard .sn { font-size: 14.5px; font-weight: 600; letter-spacing: .03em; }
+.setcard .smeta { font-size: 11.5px; color: var(--text3); letter-spacing: .02em; }
+.setcard .srow { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; }
+
+/* 横向缩略图条：套装卡片和"已挑这几件"共用一套 */
+.strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; flex: 1; min-width: 0; }
+.strip .si { flex: none; width: 54px; }
+.strip .si img, .strip .si .ph {
+  display: block; width: 54px; height: 68px; border-radius: var(--radius-xs);
+  object-fit: cover; background: var(--surface2); border: 1px solid var(--border);
+}
+.strip .si .ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--text3);
+}
+.strip .si .n { font-size: 10px; color: var(--text3); line-height: 1.4; margin-top: 5px;
+                height: 28px; overflow: hidden; }
+
+.pgroup { margin-top: 16px; }
+.pgroup .pgh { font-size: 11px; color: var(--text3); letter-spacing: .09em; margin-bottom: 8px; }
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 8px; }
+.pchip {
+  appearance: none; font: inherit; cursor: pointer; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text2); text-align: left;
+  overflow: hidden;
+  transition: border-color .18s var(--ease), background .18s var(--ease), transform .18s var(--ease);
+}
+.pchip img, .pchip .ph {
+  display: block; width: 100%; aspect-ratio: 4 / 5;
+  object-fit: cover; background: var(--surface2);
+}
+.pchip .ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--text3);
+}
+.pchip .n { font-size: 10.5px; line-height: 1.4; padding: 6px 6px 7px; word-break: break-all; }
+.pchip.on { border-color: var(--text); background: var(--accent-bg); color: var(--text); }
+.pchip:active { transform: scale(.96); }
+
+.verdictbox {
+  border-radius: var(--radius-sm); padding: 12px 13px; margin-top: 12px;
+  font-size: 12.5px; line-height: 1.65;
+  border-left: 2px solid currentColor;
+}
+.verdictbox.good { background: var(--green-bg); color: var(--green); }
+.verdictbox.bad { background: var(--red-bg); color: var(--red); }
+.verdictbox.idle { background: var(--surface2); color: var(--text3); }
+
+/* 今日页的「我搭的套装」卡片 */
+.setrow {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 11px 12px; background: var(--surface); margin-bottom: 8px;
+}
+.setrow .sh { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.setrow .sn { font-size: 14px; font-weight: 600; letter-spacing: .03em; }
+
+/* ── 提示条（toast）──
+   唯一允许有阴影的层（它真的浮在内容上面）。
+   ⚠️ transform 里必须带 translateX(-50%)，漏了就只往右偏。 */
+.toast {
+  position: fixed; left: 50%; bottom: 108px; transform: translateX(-50%);
+  background: var(--text); color: var(--bg);
+  padding: 11px 19px; border-radius: var(--radius-sm);
+  font-size: 13px; letter-spacing: .03em;
+  z-index: 99; max-width: 82vw; text-align: center;
+  box-shadow: 0 14px 34px -14px rgba(40, 30, 20, .5);
+  animation: toastIn .34s var(--ease-out) both;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translate(-50%, 12px) }
+  to { opacity: 1; transform: translate(-50%, 0) }
+}
+
+/* ── 无障碍：系统开了"减弱动态效果"就全部关掉 ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* ══════════ 桌面（≥800px）══════════
+   移动优先的设计放到 1440px 上会露三处馅（实测截图确认过）：
+     ① 顶栏标题贴屏幕最左，而正文居中 —— 不在一条竖线上；
+     ② 底部 6 个 tab 摊满 1440px，散得不像导航；
+     ③ 搭配图被拉到 370px 一张，一件 T 恤占半屏。 */
+@media (min-width: 800px) {
+  .topbar {
+    padding-left: max(18px, calc((100% - 780px) / 2 + 14px));
+    padding-right: max(18px, calc((100% - 780px) / 2 + 14px));
+  }
+  .tabs-in { max-width: 780px; }
+  .outfit { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  /* 桌面下给卡片一点内容宽度上限，别让一段说明横跨 780px */
+  .card > .note { max-width: 62ch; }
+  /* 780px 宽下"标签在左、数值在右"会隔出 400px 的空档，
+     看着像排版漏了。宽屏改成并排靠左。 */
+  .tempctl { justify-content: flex-start; gap: 14px; }
+}
+
+/* ── 计划页「常用」：搜过的城市 + 存过的行程（2026-09-28）──
+   用户原话："我每次只要有一点变动，再回到旅行界面，就要重新输入城市、
+   重新输入时间，我觉得这个就很折磨人。" 所以这两样都得"点一下就走"。
+
+   ⚠️ 这里的按钮一律显式 `font: inherit`：按钮不吃页面字体，
+   不写就会出现"这一排比那一排胖"的廉价感（和 .wash-chip 同一处坑）。 */
+.histlb {
+  font-size: 11px; letter-spacing: .12em; color: var(--text3);
+  margin: 4px 0 8px;
+}
+#tripSaved { margin-top: 18px; }
+.histchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.histchip {
+  font: inherit; font-size: 12px; letter-spacing: .03em;
+  /* 高度对齐 .wash-chip（36px）：同一页两种"小按钮"高一截矮一截最刺眼 */
+  padding: 9px 12px; border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text2); cursor: pointer;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.histchip:hover { border-color: var(--text); color: var(--text); }
+.histnone { font-size: 12px; color: var(--text3); line-height: 1.6; }
+
+/* 存过的行程：整行可点。左边是"哪几段"，右边只有「×」。
+   "按今天的天气重排"是**行动说明**（次级文字），不是第三个按钮 ——
+   一行三个按钮在 390px 上必然把名字挤成一团。 */
+.triprow { display: flex; align-items: stretch; gap: 6px; margin-bottom: 6px; }
+.tripgo {
+  flex: 1; min-width: 0; display: block; text-align: left;
+  font: inherit; cursor: pointer;
+  padding: 10px 12px; border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text);
+}
+.tripgo:hover { border-color: var(--text); background: var(--accent-bg); }
+.tripgo .tnm {
+  display: block; font-size: 13px; letter-spacing: .02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tripgo .tnd {
+  display: inline-block; margin-top: 5px;
+  font-family: var(--serif); font-size: 13px; color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.tripgo .tsub { font-size: 11px; color: var(--text3); margin-left: 8px; letter-spacing: .04em; }
+
+/* ⚠️「×」必须**定宽**（`width`，不是 `min-width`）：内容一宽就会挤动旁边那行
+   —— 这条规矩栽过两次，见 README「点了会换文案的按钮，宽度必须钉死」。 */
+.tripdel {
+  flex: 0 0 34px; width: 34px; overflow: hidden;
+  font: inherit; font-size: 15px; line-height: 1; cursor: pointer;
+  border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text3);
+}
+.tripdel:hover { border-color: var(--red); color: var(--red); }
+
+/* ── 厚度说人话（2026-09-28）──
+   用户原话："关于衣服的厚度或者温度，我其实没有办法判断。能不能简单地用
+   '厚'、'薄'、'中等'这种比较容易理解的词来写，剩下就交给系统去判断，
+   或者用一些比较直觉性的提示让大家知道应该是什么样子的厚度。"
+
+   所以：**1–5 只活在接口里**，界面上出现的一律是词 + 一句"像什么"。
+   ⚠️ 那个 range 仍然在场（只是藏起来）—— 它才是唯一的状态源，
+   5 个词按钮只是它的**遥控器**（写 value + 派发 input），
+   于是三处提交逻辑一行不用改，跟今日页那个 hidden `#temp` 是同一招。
+   ⚠️ 词表**不在这里**，在 `js/api.js` —— 只有一份，改词去那改。
+   抄第二份必然漂移，最后就是"录入页说厚、试衣间说很厚"。 */
+.thickbox { margin-top: 10px; }
+.thickraw {
+  /* 藏起来但仍是真控件：`.value` 读得到、`input` 事件照发。
+     不是为了省地方 —— 是"一个没有刻度的滑杆"等于什么都没给（用户原话）。 */
+  position: absolute; width: 1px; height: 1px; margin: 0;
+  opacity: 0; pointer-events: none;
+}
+.thickpick { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+.thickbtn {
+  font: inherit; font-size: 12px; letter-spacing: .02em;
+  /* ⚠️ `flex: 1 1 **0**` —— basis 必须是 0，5 格才真的等宽。
+     写成 `flex: 1 1 auto` 是**假的等宽**：basis 取内容宽度，实测
+     [90,78,90,78,90] —— "薄"比"很薄"窄 12px，一排参差不齐。
+     （这个项目为此栽过两次，见 README「点了会换文案的按钮，宽度必须钉死」。） */
+  flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;
+  padding: 8px 4px; text-align: center; cursor: pointer;
+  border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text2);
+  transition: background .16s var(--ease), color .16s var(--ease),
+              border-color .16s var(--ease);
+}
+.thickbtn:hover { border-color: var(--text); color: var(--text); }
+/* 选中的那个 = 墨黑填充（跟同页 .gc-slots button.on 同一套），
+   "我选了哪个"在一屏里只能有一个最强信号 */
+.thickbtn.on { background: var(--accent); border-color: var(--accent);
+               color: var(--surface); font-weight: 600; }
+.thickhint { font-size: 11.5px; line-height: 1.6; color: var(--text3); margin-top: 7px; }

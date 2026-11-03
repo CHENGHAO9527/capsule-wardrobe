@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+<!-- 手机上「添加到主屏幕」之后当 App 用：standalone 去掉地址栏，启动画面与状态栏跟纸感底色一致。
+     图标由 scripts/make_icons.py 生成，四个尺寸都在 web/ 下。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#f4f0ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="衣橱">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>接模型 · 设置</title>
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+</head>
+<body>
+<div class="topbar">
+  <h1>接模型</h1>
+  <span class="sub" id="head"></span>
+</div>
+
+<div class="wrap">
+
+  <div class="card" id="status"><div class="muted">读取配置中 <span class="spin"></span></div></div>
+
+  <!-- ═══ 穿衣口径：和模型无关 ═══ -->
+  <div class="card">
+    <h2>穿搭口径<br><span class="muted" style="font-weight:400;font-size:12px">和模型无关 —— 它决定引擎怎么判"今天这套够不够暖"</span></h2>
+    <div class="note" style="margin-top:0">
+      用的是「<b>26℃穿衣法则</b>」（人民日报 / 科普中国都在用的那条）：
+      <div style="margin:8px 0"><code>当日气温 + 衣物保暖值之和 = 体感舒适温度</code></div>
+      每件衣服的保暖值在「录入」页的<b>改字段</b>里（T恤 1℃、卫衣 4℃、羽绒服 9℃…），
+      裤子鞋子不参与加总 —— 下半身只影响好不好看。
+      <br><br>
+      <b>这个数越大，要求越高</b>：调到 26℃ 就是法则原文（那是标给儿童的），
+      更冷的日子会直接排不出搭配；调到 21℃ 更宽松。
+      <b>它同时决定"你的衣橱最冷能穿到几度"。</b>
+    </div>
+    <label>体感舒适温度</label>
+    <div class="row" style="gap:6px;margin-top:6px">
+      <button class="btn sm" data-comfort="20">20℃ 怕热</button>
+      <button class="btn sm" data-comfort="22">22℃ 中间</button>
+      <button class="btn sm" data-comfort="24">24℃ 偏冷</button>
+      <button class="btn sm" data-comfort="26">26℃ 法则原文</button>
+    </div>
+    <div class="grid2" style="margin-top:10px">
+      <div><label>精确值 <b id="comfortV">—</b> ℃</label>
+        <input type="range" id="comfort" min="18" max="28" step="0.5" value="22"></div>
+      <div><label>现在这套衣橱能穿到</label>
+        <div class="note" id="comfortNote" style="margin:0">—</div></div>
+    </div>
+    <div class="note" id="comfortMsg"></div>
+  </div>
+
+  <!-- ═══ 主配置 ═══ -->
+  <div class="card">
+    <h2>1 选服务商</h2>
+    <div class="note" style="margin-top:0">
+      选完会自动填好接口地址和模型名。
+    </div>
+    <label>服务商</label>
+    <select id="provider"></select>
+    <div class="note" id="hint"></div>
+
+    <div class="note" style="background:var(--surface2);padding:10px;border-radius:var(--radius-sm);margin-top:10px">
+      <b>推荐 DeepSeek</b>：模型名填 <code>deepseek-flash</code>（模型版本 V4.1-Flash，原生支持看图）。
+      去 <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a>
+      充值后建一个 API Key 粘进来即可。<b>一个 Key 同时管识别和搭配排序</b>，不用配两个服务商。
+      <br><br>
+      想一分钱不花也可以用「智谱 GLM-4V」，<code>glm-4v-flash</code> 有免费额度。
+    </div>
+
+    <label>API Key</label>
+    <input id="key" type="password" autocomplete="off" placeholder="粘贴你的 Key">
+    <div class="note">只存在你这台电脑的 <code>data/vision.json</code> 里，不上传任何地方。</div>
+  </div>
+
+  <div class="card">
+    <h2>2 确认参数<br><span class="muted" style="font-weight:400;font-size:12px">一般不用改，选完服务商就自动填好了</span></h2>
+    <label>接口地址</label>
+    <input id="base" placeholder="https://open.bigmodel.cn/api/paas/v4">
+    <label>模型名</label>
+    <input id="model" placeholder="glm-4v-flash">
+    <label>超时（秒）</label>
+    <input id="timeout" type="number" value="90" min="10" max="300">
+    <div class="note">识别一张图大约 3–15 秒。本地 Ollama 慢，可以调到 180。</div>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <input type="checkbox" id="noThink" style="width:auto;margin:0">
+      <span>关闭「思考模式」</span>
+    </label>
+    <div class="note">
+      <b>DeepSeek 必须勾上。</b>它的思考模式默认打开、强度还是 high —— 模型会先把 token
+      花在一段思维链上（放在 <code>reasoning_content</code> 里），回答正文
+      <code>content</code> 就可能是空的。实测：不勾有 4/19 张图返回空，勾上 19/19 全过。
+      分类这种任务本来也不需要思考，关掉更快更省。
+      其他服务商没有这个参数，勾了也不会发出去。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3 保存并测试</h2>
+    <div class="row">
+      <button class="btn primary" id="save">保存并启用</button>
+      <button class="btn" id="test">测试连接</button>
+      <button class="btn danger" id="off">关闭识别</button>
+    </div>
+    <div class="note" id="msg"></div>
+  </div>
+
+  <!-- ═══ 说明 ═══ -->
+  <div class="card">
+    <h2>接了模型之后，哪些事会变</h2>
+    <div class="steps">
+      <div class="step"><b>✓</b><div><b>录入不用点槽位了。</b>上传照片自动填好品类、正式度、厚度、温度区间、领型、材质、版型、图案。</div></div>
+      <div class="step"><b>✓</b><div><b>今日搭配有了审美排序。</b>硬规则算出的候选里，由模型挑出最好看的那套并给一句理由。</div></div>
+      <div class="step"><b>✗</b><div><b>颜色仍然由本地测量</b>，不交给模型。模型的色值会随打光变化、不可复现，而颜色决定撞色规则，错一个值会污染之后所有判断。</div></div>
+      <div class="step"><b>✗</b><div><b>搭配不会由模型生成。</b>所有组合都是硬规则从你衣橱里枚举出来的 —— 让它生成，它就会推荐你根本没有的衣服。</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>不接模型会怎样</h2>
+    <div class="note" style="margin-top:0">
+      完全能用。录入时每件<b>点一下槽位</b>，其余字段按品类默认值自动填；今日搭配走本地排序。
+      模型是加速器，不是必需品 —— 识别失败时也会自动退回这个模式，不会卡住录入。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>花钱吗</h2>
+    <div class="note" style="margin-top:0">
+      <b>几乎不花。</b>以 DeepSeek 为例：单张图最多算 1024 个 token，空闲时段输入 1 元 / 百万 token，
+      识别一件衣服约 <b>0.2 分钱</b>；输出按 4 元 / 百万算，一次识别也就几厘。
+      <br><br>
+      按 80 件衣服的初始录入算，<b>总共不到两毛钱</b>；之后每天几次搭配排序，一年几毛钱。
+      而且周末和工作日晚上（非 9:00–12:00、14:00–18:00）价格再减半。
+      <br><br>
+      <b>真正的成本是你的时间，不是 API 调用。</b>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/js/api.js?v=43"></script>
+<script>
+const $ = s => document.querySelector(s);
+let cfg = null;
+
+async function load() {
+  try {
+    cfg = await API.get('/api/vision/config');
+  } catch (e) {
+    $('#status').innerHTML = `<div class="verdict skip"><div class="text">读不到配置：${esc(e.message)}</div></div>`;
+    return;
+  }
+  renderStatus();
+  const base = cfg.presets.some(p => p.base_url === $('#base').value);
+  $('#provider').innerHTML = '<option value="">— 选一个 —</option>' +
+    cfg.presets.map(p => `<option value="${p.id}"${p.id === cfg.provider ? ' selected' : ''}>${esc(p.label)}</option>`).join('') +
+    '<option value="__custom"' + (!cfg.provider ? ' selected' : '') + '>自定义（自行填写）</option>';
+  if (!$('#base').value) $('#base').value = cfg.base_url || '';
+  if (!$('#model').value) $('#model').value = cfg.model || '';
+  $('#timeout').value = cfg.timeout || 90;
+  $('#noThink').checked = !!cfg.no_think;
+  $('#key').placeholder = cfg.has_key ? '已保存（留空 = 不修改）' : '粘贴你的 Key';
+  showHint();
+}
+
+function renderStatus() {
+  const on = cfg.enabled;
+  $('#head').textContent = on ? '已启用' : (cfg.configured ? '已填但未启用' : '未配置');
+  $('#status').innerHTML = on
+    ? `<div class="verdict buy"><div class="label">已启用</div>
+         <div class="text">模型 <b>${esc(cfg.model)}</b><br>
+         <span class="muted" style="font-size:12px">${esc(cfg.base_url)}</span></div></div>
+       <div class="note">现在去「录入」页拖照片，会自动填好字段；「今日」页的搭配也会有模型排序。</div>`
+    : `<div class="verdict compare"><div class="label">还没接上</div>
+         <div class="text">在下面选一个服务商、粘上 API Key，就能开始自动识别。</div></div>
+       <div class="note">不接也能用 —— 录入时每件点一下槽位而已。</div>`;
+}
+
+function showHint() {
+  const id = $('#provider').value;
+  const p = cfg.presets.find(x => x.id === id);
+  $('#hint').textContent = p ? p.hint : '自己填接口地址和模型名（任何 OpenAI 兼容接口都行）。';
+  if (!p) return;
+  const isStale = v => !v || cfg.presets.some(x => x.base_url === v || x.model === v);
+  if (isStale($('#base').value)) $('#base').value = p.base_url;
+  if (isStale($('#model').value)) $('#model').value = p.model;
+}
+
+// 换服务商时同步思考模式开关；载入时不覆盖已保存的值
+$('#provider').addEventListener('change', () => {
+  showHint();
+  const p = cfg.presets.find(x => x.id === $('#provider').value);
+  if (p) $('#noThink').checked = !!p.no_think;
+});
+
+function body() {
+  const provider = $('#provider').value;
+  const b = {
+    provider: provider === '__custom' ? '' : provider,
+    base_url: $('#base').value.trim(),
+    model: $('#model').value.trim(),
+    timeout: Number($('#timeout').value) || 90,
+    no_think: $('#noThink').checked,
+  };
+  if ($('#key').value.trim()) b.api_key = $('#key').value.trim();
+  return b;
+}
+
+$('#save').addEventListener('click', async () => {
+  $('#msg').innerHTML = '保存中 <span class="spin"></span>';
+  try {
+    const b = body();
+    b.enabled = true;
+    cfg = await API.post('/api/vision/config', b);
+    $('#key').value = '';
+    $('#msg').textContent = cfg.enabled
+      ? '已保存并启用。建议点一下「测试连接」确认能通。'
+      : '没填完 —— 接口地址和模型名是必填的。';
+    await load();
+  } catch (e) { $('#msg').textContent = '保存失败：' + e.message; }
+});
+
+$('#test').addEventListener('click', async () => {
+  $('#msg').innerHTML = '正在用一张测试图调用模型 <span class="spin"></span>';
+  try {
+    const r = await API.post('/api/vision/test', {});
+    if (r.ok) {
+      const s = r.sample || {};
+      $('#msg').innerHTML = `通了。它把测试图识别成了
+        <b>${esc(s.slot || '')} / ${esc(s.category || '')}</b>
+        （正式度 ${s.formality}，厚度 ${thickWord(s.thickness)}，${s.temp_min}~${s.temp_max}℃）。
+        可以去「录入」页试真照片了。`;
+    } else {
+      $('#msg').innerHTML = `<span style="color:var(--red)">失败：${esc(r.error)}</span>`;
+    }
+  } catch (e) { $('#msg').innerHTML = `<span style="color:var(--red)">失败：${esc(e.message)}</span>`; }
+});
+
+$('#off').addEventListener('click', async () => {
+  cfg = await API.post('/api/vision/config', { enabled: false });
+  $('#msg').textContent = '已关闭。录入退回「点一下槽位」模式，其他不受影响。';
+  await load();
+});
+
+/* ══════════════ 体感舒适温度（26℃穿衣法则）══════════════ */
+
+/* 上衣能垫掉的最高保暖值 —— 和 `Closet.max_top_warmth()` 同一个口径：
+   max(内搭，排除"只能单穿") + max(中间层) + max(外层)。
+   在前端算一遍是为了让用户**立刻看到"改这个数会怎样"**，不用等后端跑一遍。 */
+function maxTopWarmth(its) {
+  const best = (slot, skipSolo) => {
+    let m = 0;
+    for (const it of its) {
+      if (it.slot !== slot) continue;
+      if (skipSolo && (it.tags || '').includes('solo_only')) continue;
+      m = Math.max(m, Number(it.warmth) || 0);
+    }
+    return m;
+  };
+  return best('L1', true) + best('L2', false) + best('L3', false);
+}
+
+function paintComfort(comfort, topWarmth) {
+  const c = Number(comfort);
+  $('#comfortV').textContent = c;
+  $('#comfort').value = c;
+  if (!topWarmth) { $('#comfortNote').textContent = '还没录上衣'; return; }
+  const limit = c - topWarmth;
+  $('#comfortNote').innerHTML =
+    `<b>${limit.toFixed(1)}℃</b> 以上 —— 上装叠满能垫 ${topWarmth}℃`;
+}
+
+async function loadComfort() {
+  const [p, items] = await Promise.all([
+    API.get('/api/prefs'),
+    API.get('/api/items?stage=owned'),
+  ]);
+  const topWarmth = maxTopWarmth(items);
+  $('#comfort').min = p.range[0];
+  $('#comfort').max = p.range[1];
+  paintComfort(p.prefs.comfort, topWarmth);
+  $('#comfort').addEventListener('input', () => paintComfort($('#comfort').value, topWarmth));
+  $('#comfort').addEventListener('change', () => saveComfort(topWarmth));
+  document.querySelectorAll('[data-comfort]').forEach(b => {
+    b.addEventListener('click', () => {
+      paintComfort(b.dataset.comfort, topWarmth);
+      saveComfort(topWarmth);
+    });
+  });
+}
+
+async function saveComfort(topWarmth) {
+  try {
+    const r = await API.post('/api/prefs', { comfort: Number($('#comfort').value) });
+    paintComfort(r.prefs.comfort, topWarmth);
+    $('#comfortMsg').textContent = '已生效 —— 今日推荐和计划页立刻按新口径算。';
+  } catch (e) {
+    // 绝不静默失败：改了没生效却不说，用户会以为按钮坏了
+    $('#comfortMsg').innerHTML = `<span style="color:var(--red)">保存失败：${esc(e.message)}</span>`;
+  }
+}
+
+loadComfort().catch(e => {
+  $('#comfortMsg').innerHTML = `<span style="color:var(--red)">读不到设置：${esc(e.message)}</span>`;
+});
+
+load();
+</script>
+<script>
+/* 界面版本号 —— 给"你说改好了、可我刷新了还是一样"这类争执一个**可读的裁判**。
+   排查时只要用户报一个数字，就能立刻区分：
+     · 报的是旧号 → 他手上是缓存的旧页面（不是改动没生效）
+     · 报的是新号 → 页面确实是新版，问题在别处
+
+   ⚠️ 版本号**从 app.css 的 ?v= 里读**，绝不手写。
+   手写的话迟早会忘了同步 —— 那这东西就从"自证工具"变成"撒谎工具"，
+   比没有更糟。 */
+(function showUiVersion() {
+  const href = (document.querySelector('link[href*="app.css"]') || {}).href || '';
+  const m = href.match(/[?&]v=(\d+)/);
+  const wrap = document.querySelector('.wrap');
+  if (!wrap) return;
+  const d = document.createElement('div');
+  d.className = 'note';
+  d.id = 'uiVer';
+  d.style.cssText = 'text-align:center;color:var(--text3);font-size:11.5px;padding:20px 0 10px';
+  d.textContent = m ? `界面版本 v${m[1]}` : '界面版本 未知';
+  wrap.appendChild(d);
+})();
+</script>
+<script>
+/* 手机显示自检 —— 给「你手机上到底是页面问题，还是浏览器在强行变暗」做裁判。
+   用户实拍反馈过「手机上打开整页是黑的、连底栏的计划/套装都看不到」，
+   而那既可能是我们的配色问题，也可能是**浏览器/系统的强制暗化**
+   （Chrome Auto Dark、安卓 WebView ForceDark、Alook 这类浏览器的夜间模式）——
+   后者**绕过所有 CSS**，页面自身无法阻止。实测数据：
+   强制暗化把底栏文字与背景的对比度从 15.6:1 直接压到 **1.01:1**，字彻底消失。
+
+   ⚠️ 这里三块色标**颜色写死**，刻意不引用 CSS 变量 ——
+   它的全部意义就是"一个不依赖任何样式的独立参照物"。
+   如果连它都发暗，那问题百分之百在页面之外。 */
+(function showDisplayCheck() {
+  /* ⚠️ 整块包 try/catch，而且**不是**为了"优雅"：
+     这是锦上添花的自检块，但它后面紧跟 `tabs()` 注入底栏那句脚本 ——
+     一旦这里抛异常，用户看到的是**底部导航整条消失**，
+     而原因跟导航毫无关系，排查会像大海捞针。
+     （2026-09-27 就被 checkform 的 DOM 桩当场抓出来：桩里没有 matchMedia。）
+     `matchMedia` 也按"可能不存在"处理，测不出就明说测不出，不编。 */
+  try {
+    const wrap = document.querySelector('.wrap');
+    if (!wrap) return;
+
+    // ⚠️ 这三块**必须写死十六进制**，不能换成 var(--bg) / var(--surface) ——
+    // 它们的作用就是"照妖镜"：看浏览器有没有在页面上做强制暗化。
+    // 一旦跟着主题变量走，被暗化的颜色和正常的颜色就分不清了。
+    // 所以取纯白 / 纯黑这种**任何主题下都该长这样**的绝对参照。
+    const swatches = [
+      ['#ffffff', '纯白', '不许发灰'],
+      ['#f4f0ea', '纸底', '浅色主题的底'],
+      ['#000000', '纯黑', '不许发亮'],
+    ].map(([hex, name, desc]) =>
+      '<div style="flex:1;text-align:center">' +
+        '<div style="height:50px;border:1px solid #bcaf9b;background:' + hex + '"></div>' +
+        '<div style="font-size:10.5px;color:var(--text3);margin-top:6px;line-height:1.5">' +
+          name + '<br>' + desc + '</div>' +
+      '</div>').join('');
+
+    const mq = (typeof window.matchMedia === 'function')
+      ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    const isDark = !!(mq && mq.matches);
+    const cs = getComputedStyle(document.documentElement).colorScheme;
+    const bodyBg = getComputedStyle(document.body).backgroundColor;
+
+    const box = document.createElement('div');
+    box.className = 'card';
+    box.style.marginTop = '14px';
+    box.innerHTML =
+      '<h2>手机显示自检</h2>' +
+      '<div style="font-size:12.5px;color:var(--text3);line-height:1.75;margin-bottom:14px">' +
+        '左边那块应该是<b>发亮的纯白</b>，右边那块应该是<b>很深的纯黑</b>。<br>' +
+        '如果<b>连纯白那块都发灰发暗</b>，那是浏览器在给本页做<b>强制变暗</b> —— ' +
+        '跟本页的深浅模式无关，去浏览器设置里关掉它的「夜间模式」即可。' +
+      '</div>' +
+      '<div style="display:flex;gap:10px">' + swatches + '</div>';
+    const info = document.createElement('div');
+    info.id = 'dcheckInfo';
+    info.style.cssText = 'font-size:11.5px;color:var(--text3);margin-top:14px;line-height:1.9;white-space:pre-wrap';
+    info.textContent =
+      '本页生效主题：' + (isDark ? '深色（跟着系统自动切）' : '浅色') + '\n' +
+      'color-scheme ：' + cs + '\n' +
+      '页面底实测色：' + bodyBg + '\n' +
+      '浏览器：' + String(navigator.userAgent || '').slice(0, 96);
+    box.appendChild(info);
+    wrap.appendChild(box);
+  } catch (e) {
+    if (window.console && console.warn) console.warn('手机显示自检块跳过：', e);
+  }
+})();
+</script>
+<script>document.body.insertAdjacentHTML('beforeend', tabs(''));</script>
+</body>
+</html>
